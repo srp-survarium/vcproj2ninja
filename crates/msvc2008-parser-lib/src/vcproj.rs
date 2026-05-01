@@ -39,7 +39,7 @@ pub struct Configuration {
     // IntermediateDirectory="$(SolutionDir)../binaries/$(PlatformName)/intermediates/$(ConfigurationName)/$(ProjectName)"
     pub intermediate_directory: Option<String>, // TODO: Same as above
 
-    pub configuration_type: ConfigurationType, // ??
+    pub configuration_type: ConfigurationType,
     pub character_set: Option<CharacterSet>,
     pub whole_program_optimization: Option<bool>,
     pub managed_extensions: Option<ManagedExtensions>,
@@ -249,8 +249,8 @@ flag_enum! {
 flag_enum! {
     enum CharacterSet {
         0 => "",
-        1 => "_MBCS",
-        2 => "_UNICODE",
+        1 => "_UNICODE",
+        2 => "_MBCS",
     }
 }
 flag_enum! {
@@ -664,9 +664,9 @@ impl CompilerTool {
             assembler_listing_location: _,
             precompiled_header_through,
             precompiled_header_file: _,
-            disable_specific_warnings: _,
+            disable_specific_warnings,
             additional_include_directories: _,
-            preprocessor_definitions: _,
+            preprocessor_definitions,
         } = self;
 
         //
@@ -725,6 +725,79 @@ impl CompilerTool {
             omit_frame_pointers,
             enable_fiber_safe_optimizations,
             whole_program_optimization,
+        ];
+
+        let mut preprocessor_definitions = preprocessor_definitions
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        if let Some(inherited_property_sheets) = &cfg.inherited_property_sheets {
+            let mut vc_version = 0;
+
+            for inherited_property_sheet in inherited_property_sheets {
+                match inherited_property_sheet.as_str() {
+                    "$(VCInstallDir)VCProjectDefaults\\UpgradeFromVC60.vsprops"
+                    | "UpgradeFromVC60.vsprops" => {
+                        assert_eq!(vc_version, 0);
+                        vc_version = 60;
+                    }
+                    "$(VCInstallDir)VCProjectDefaults\\UpgradeFromVC70.vsprops"
+                    | "UpgradeFromVC70.vsprops" => {
+                        assert_eq!(vc_version, 0);
+                        vc_version = 70;
+                    }
+                    "$(VCInstallDir)VCProjectDefaults\\UpgradeFromVC71.vsprops"
+                    | "UpgradeFromVC71.vsprops" => {
+                        assert_eq!(vc_version, 0);
+                        vc_version = 71;
+                    }
+                    "..\\libogg.vsprops" => {
+                        // TODO
+                    }
+                    _ => unreachable!("TODO"),
+                }
+            }
+
+            match vc_version {
+                0 => (),
+                60 => preprocessor_definitions.push("_VC80_UPGRADE=0x0600"),
+                70 => preprocessor_definitions.push("_VC80_UPGRADE=0x0700"),
+                71 => preprocessor_definitions.push("_VC80_UPGRADE=0x0710"),
+                _ => unreachable!(),
+            }
+        }
+
+        match cfg.configuration_type {
+            ConfigurationType::_2 => preprocessor_definitions.push("_WINDLL"),
+            _ => (),
+        }
+
+        if let Some(character_set) = cfg.character_set {
+            match character_set {
+                CharacterSet::_1 => {
+                    preprocessor_definitions.push("_UNICODE");
+                    preprocessor_definitions.push("UNICODE");
+                }
+                CharacterSet::_2 => preprocessor_definitions.push("_MBCS"),
+                _ => (),
+            }
+        }
+
+        if !preprocessor_definitions.is_empty() {
+            result.push(' ');
+        }
+
+        for preprocessor_definition in preprocessor_definitions {
+            result.push_str("/D ");
+            result.push('"');
+            result.push_str(&preprocessor_definition);
+            result.push('"');
+            result.push(' ');
+        }
+
+        result.push_str(&flags![
             string_pooling,
             generate_program_database,
             exception_handling,
@@ -750,9 +823,9 @@ impl CompilerTool {
             show_includes,
             struct_member_alignment,
             detect_64_bit_portability_problems,
-        ];
+        ]);
 
-        for disable_specific_warning in self.disable_specific_warnings.iter().flatten() {
+        for disable_specific_warning in disable_specific_warnings.iter().flatten() {
             result.push(' ');
             result.push_str("/wd");
             result.push_str(&disable_specific_warning);
