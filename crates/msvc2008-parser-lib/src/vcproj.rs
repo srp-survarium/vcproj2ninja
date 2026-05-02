@@ -1,3 +1,5 @@
+use std::{collections::HashMap, ffi::OsStr, path::Path};
+
 use anyhow::Context;
 use msvc2008_parser_proc::{ParseXml, flag_enum};
 
@@ -65,7 +67,7 @@ pub struct Platform {
     pub name: String,
 }
 
-#[derive(Debug, ParseXml)]
+#[derive(Debug, ParseXml, Eq, PartialEq, Hash, Clone, Default)]
 #[parse_xml(
     tag = "VCCLCompilerTool",
     ignore = "Name",
@@ -114,13 +116,14 @@ pub struct CompilerTool {
     pub precompiled_header_through: Option<String>,
     pub precompiled_header_file: Option<String>,
     // NOTE: can be ';' or ',' separated depending on project
-    // TODO: Forgot how I wrote this, XD
-    // TODO: We might not want to split this at all
     pub disable_specific_warnings: Option<Vec<String>>,
     // Requires interpolation: $(SolutionDir)/stlport;
     pub additional_include_directories: Option<Vec<String>>,
     // PreprocessorDefinitions="WIN32;NDEBUG;VOSTOK_STATIC_LIBRARIES;MASTER_GOLD;"
     pub preprocessor_definitions: Option<Vec<String>>,
+
+    #[rename("XMLDocumentationFileName")]
+    pub xml_documentation_file_name: Option<String>,
 }
 
 #[derive(Debug, ParseXml)]
@@ -197,7 +200,7 @@ pub struct Filter {
 #[derive(Debug, ParseXml)]
 pub struct File {
     pub relative_path: String,
-    pub file_type: Option<u8>,
+    pub file_type: Option<u8>, // NOTE: Seems to not to affect flags
     pub sub_type: Option<String>,
 
     #[skip]
@@ -212,26 +215,7 @@ pub struct FileConfiguration {
     pub excluded_from_build: Option<bool>,
 
     #[skip]
-    pub tool: Tool,
-}
-
-#[derive(Debug, Default, ParseXml)]
-pub struct Tool {
-    pub name: String,
-    pub use_precompiled_header: Option<UsePrecompiledHeader>,
-    pub additional_options: Option<String>,
-    pub basic_runtime_checks: Option<BasicRuntimeChecks>,
-    pub disable_specific_warnings: Option<Vec<String>>,
-    pub generate_preprocessed_file: Option<GeneratePreprocessedFile>,
-    pub object_file: Option<String>,
-    pub optimization: Option<Optimization>,
-    pub precompiled_header_file: Option<String>,
-    pub precompiled_header_through: Option<String>,
-    pub preprocessor_definitions: Option<Vec<String>>,
-    pub show_includes: Option<ShowIncludes>,
-    pub warning_level: Option<WarningLevel>,
-    #[rename("XMLDocumentationFileName")]
-    pub xml_documentation_file_name: Option<String>,
+    pub tool: Option<CompilerTool>,
 }
 
 //
@@ -388,6 +372,7 @@ flag_enum! {
         0 => "",
         1 => "/Yc",
         2 => "/Yu",
+        3 => "/YX", // deprecated: Automatic
     }
 }
 flag_enum! {
@@ -623,8 +608,17 @@ macro_rules! flags {
     }};
 }
 
+type ResultParse = (
+    HashMap<CompilerTool, Vec<String>>,
+    HashMap<CompilerTool, Vec<String>>,
+);
 impl CompilerTool {
-    pub fn to_flags(&self, cfg: &Configuration) -> String {
+    pub fn to_flags(
+        &self,
+        cfg: &Configuration,
+        vcproject: &VCProject,
+        configuration_platform: &str,
+    ) -> (ResultParse, Vec<String>) {
         let Self {
             additional_options,
             optimization,
@@ -663,11 +657,16 @@ impl CompilerTool {
             program_data_base_file_name: _,
             assembler_listing_location: _,
             precompiled_header_through,
-            precompiled_header_file: _,
+            precompiled_header_file,
             disable_specific_warnings,
             additional_include_directories: _,
             preprocessor_definitions,
+            xml_documentation_file_name: _,
         } = self;
+
+        if let Some(phf) = precompiled_header_file {
+            println!("phf: '{phf}'")
+        }
 
         //
         //
@@ -698,6 +697,8 @@ impl CompilerTool {
             (Some(use_precompiled_header), Some(precompiled_header_through))
                 if !matches!(*use_precompiled_header, UsePrecompiledHeader::_0) =>
             {
+                assert_ne!(use_precompiled_header, &UsePrecompiledHeader::_1);
+
                 let mut flag = use_precompiled_header.as_str().to_string();
                 flag.push('"');
                 flag.push_str(precompiled_header_through);
@@ -706,6 +707,7 @@ impl CompilerTool {
             }
             _ => None,
         };
+        println!("use_precompiled_header: '{use_precompiled_header:?}'");
 
         // TODO: default option
         let exception_handling = Some(
@@ -759,7 +761,6 @@ impl CompilerTool {
                     _ => unreachable!("TODO"),
                 }
             }
-
             match vc_version {
                 0 => (),
                 60 => preprocessor_definitions.push("_VC80_UPGRADE=0x0600"),
@@ -845,7 +846,81 @@ impl CompilerTool {
             result.push_str(flag.as_str());
         }
 
+        let file_types = Self::_parse_files(&vcproject.files, configuration_platform);
+
+        (file_types, vec![result])
+    }
+
+    // @TODO: We only care right now about the compiler
+    fn _parse_files(files: &Files, configuration_platform: &str) -> ResultParse {
+        let mut result = (HashMap::new(), HashMap::new());
+
+        for file in &files.files {
+            _ = Self::_parse_file(&mut result, file, configuration_platform);
+        }
+
+        for filter in &files.filters {
+            _ = Self::_parse_filter(&mut result, filter, configuration_platform);
+        }
+
         result
+    }
+
+    fn _parse_filter(result: &mut ResultParse, filter: &Filter, configuration_platform: &str) {
+        for file in &filter.files {
+            _ = Self::_parse_file(result, file, configuration_platform);
+        }
+
+        for filter in &filter.filters {
+            _ = Self::_parse_filter(result, filter, configuration_platform);
+        }
+    }
+
+    fn _parse_file(result: &mut ResultParse, file: &File, configuration_platform: &str) {
+        for file in &file.files {
+            _ = Self::_parse_file(result, file, configuration_platform);
+        }
+
+        if file.file_configurations.is_empty() {
+            let map = match Path::new(&file.relative_path)
+                .extension()
+                .map(OsStr::as_encoded_bytes)
+            {
+                Some(b"c") => &mut result.0,
+                Some(b"cpp") => &mut result.1,
+                Some(b"h") => return,
+                _ => {
+                    eprintln!("Couldn't parse extension: {}", file.relative_path);
+                    return;
+                }
+            };
+
+            map.entry(CompilerTool::default())
+                .or_default()
+                .push(file.relative_path.clone());
+            return;
+        }
+        for config in &file.file_configurations {
+            if config.name == configuration_platform {
+                let Some(cl_tool) = &config.tool else {
+                    continue;
+                };
+
+                let map = match Path::new(&file.relative_path)
+                    .extension()
+                    .map(OsStr::as_encoded_bytes)
+                {
+                    Some(b"c") => &mut result.0,
+                    Some(b"cpp") => &mut result.1,
+                    Some(b"h") => continue,
+                    _ => unreachable!("Couldn't parse extension: {}", file.relative_path),
+                };
+
+                map.entry(cl_tool.clone())
+                    .or_default()
+                    .push(file.relative_path.clone());
+            }
+        }
     }
 }
 
@@ -1002,11 +1077,19 @@ impl FileConfiguration {
     pub fn parse_xml(node: roxmltree::Node) -> anyhow::Result<Self> {
         let mut this = Self::parse_xml_inner(node)?;
 
-        this.tool = node
+        for tool in node
             .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "Tool")
-            .context("FileConfiguration missing Tool")
-            .and_then(Tool::parse_xml)?;
+            .filter(|n| n.is_element() && n.tag_name().name() == "Tool")
+        {
+            match tool.attribute("Name") {
+                Some("VCCLCompilerTool") => {
+                    assert!(this.tool.is_none(), "{:#?}", this.tool);
+                    this.tool = Some(CompilerTool::parse_xml(tool)?);
+                }
+                Some(_) => (),
+                None => anyhow::bail!("Tool without a name"),
+            }
+        }
 
         Ok(this)
     }

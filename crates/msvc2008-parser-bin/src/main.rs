@@ -89,12 +89,31 @@ fn main() -> anyhow::Result<()> {
         if !cfg_platform.is_enabled {
             println!("[{}] [{}]: <disabled>", vcproj.name, build_cfg.name);
         } else if let Some(cl) = &build_cfg.compiler_tool {
-            println!(
-                "[{}] [{}]: {}",
-                vcproj.name,
-                build_cfg.name,
-                cl.to_flags(&build_cfg)
-            );
+            let ((c_files, cpp_files), flags) =
+                cl.to_flags(&build_cfg, &vcproj, &cfg_platform.actual_cfg.0);
+            for flag in flags {
+                println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
+            }
+
+            if !c_files.is_empty() {
+                println!("C-files:");
+            }
+            for (i, (_, c_files)) in c_files.iter().enumerate() {
+                println!("{i}:");
+                for c_file in c_files {
+                    println!("  {c_file}");
+                }
+            }
+
+            if !cpp_files.is_empty() {
+                println!("CPP-files:");
+            }
+            for (i, (_, c_files)) in cpp_files.iter().enumerate() {
+                println!("{i}:");
+                for c_file in c_files {
+                    println!("  {c_file}");
+                }
+            }
         } else {
             println!("[{}] [{}]: <nocomptool>", vcproj.name, build_cfg.name);
         }

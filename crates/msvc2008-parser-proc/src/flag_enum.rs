@@ -142,7 +142,7 @@ pub fn flag_enum(input: proc_macro::TokenStream) -> syn::Result<proc_macro2::Tok
     };
 
     Ok(quote! {
-        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
         #[repr(transparent)]
         pub struct #name(&'static str);
 
