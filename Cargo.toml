@@ -10,6 +10,10 @@ members = [
 version = "0.1.0"
 edition = "2024"
 
+[workspace.lints.clippy]
+single_match = "allow"
+collapsible_if = "allow"
+
 [workspace.dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.41", features = ["derive", "env"] }

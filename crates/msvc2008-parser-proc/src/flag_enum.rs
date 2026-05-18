@@ -101,14 +101,21 @@ pub fn flag_enum(input: proc_macro::TokenStream) -> syn::Result<proc_macro2::Tok
 
     let parse_arms = entries
         .iter()
+        .map(|FlagEntry { value, .. }| {
+            quote! { #value => Ok(Self(#value as i8)), }
+        })
+        .collect::<proc_macro2::TokenStream>();
+
+    let as_str_arms = entries
+        .iter()
         .map(|FlagEntry { value, flag }| {
-            quote! { #value => Ok(Self(#flag)), }
+            quote! { #value => #flag, }
         })
         .collect::<proc_macro2::TokenStream>();
 
     let consts = entries
         .iter()
-        .map(|FlagEntry { value, flag }| {
+        .map(|FlagEntry { value, .. }| {
             let ident_name = if *value < 0 {
                 format!("_N{}", value.unsigned_abs())
             } else {
@@ -116,7 +123,7 @@ pub fn flag_enum(input: proc_macro::TokenStream) -> syn::Result<proc_macro2::Tok
             };
             let ident = syn::Ident::new(&ident_name, proc_macro2::Span::call_site());
 
-            quote! { pub const #ident: Self = Self(#flag); }
+            quote! { pub const #ident: Self = Self(#value); }
         })
         .collect::<proc_macro2::TokenStream>();
 
@@ -142,9 +149,9 @@ pub fn flag_enum(input: proc_macro::TokenStream) -> syn::Result<proc_macro2::Tok
     };
 
     Ok(quote! {
-        #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+        #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #[repr(transparent)]
-        pub struct #name(&'static str);
+        pub struct #name(i8);
 
         impl #name {
             #consts
@@ -152,7 +159,10 @@ pub fn flag_enum(input: proc_macro::TokenStream) -> syn::Result<proc_macro2::Tok
             #parse_fn
 
             fn as_str(&self) -> &'static str {
-                self.0
+                match self.0 {
+                    #as_str_arms
+                    _ => unreachable!(),
+                }
             }
         }
 

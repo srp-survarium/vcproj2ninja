@@ -30,7 +30,7 @@ pub struct Project {
     pub section_dependencies: Option<SectionDependencies>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Debug, Eq)]
 pub enum ProjectKind {
     Folder,
     Cpp,
@@ -365,6 +365,10 @@ impl ConfigurationPlatform {
 
     fn take_until1_platform_sep(i: &str) -> nom::IResult<&str, &str> {
         take_while1(move |c| !" .\t\r\n".contains(c)).parse(i)
+    }
+
+    pub fn configuration_n_platform(&self) -> (&str, &str) {
+        self.0.split_once('|').unwrap()
     }
 }
 

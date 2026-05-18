@@ -5,6 +5,9 @@ edition = { workspace = true }
 
 [lib]
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 nom = { workspace = true }

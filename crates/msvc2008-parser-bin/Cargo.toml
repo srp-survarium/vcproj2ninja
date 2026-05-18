@@ -3,6 +3,9 @@ name = "msvc2008-parser-bin"
 version = { workspace = true }
 edition = { workspace = true }
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }

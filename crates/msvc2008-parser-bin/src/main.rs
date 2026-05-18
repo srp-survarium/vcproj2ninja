@@ -7,7 +7,10 @@ use std::path::Path;
 use anyhow::Context;
 use clap::Parser;
 
-use msvc2008_parser_lib::{sln, vcproj};
+use msvc2008_parser_lib::{
+    sln,
+    vcproj::{self, MsBuildEnvironment},
+};
 
 #[derive(clap::Parser)]
 pub struct Cli {
@@ -39,16 +42,21 @@ fn main() -> anyhow::Result<()> {
         .find_project_dependencies(&project_name)
         .context("Project is not found")?;
 
-    println!("Found {} dependencies for '{}'", deps.len(), project_name);
-    for dep in &deps {
-        println!("> {}", dep.name);
-    }
-    println!();
+    // println!("Found {} dependencies for '{}'", deps.len(), project_name);
+    // for dep in &deps {
+    //     println!("> {}", dep.name);
+    // }
+    // println!();
 
-    let mut project_path = sln_path
+    let sln_root = sln_path
         .parent()
         .context("Sln path must have a parent")?
         .to_path_buf();
+    let mut project_path = sln_root.clone();
+
+    let mut sln_root = sln_root.to_string_lossy().to_string(); // TODO
+    sln_root.push('\\');
+
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
 
     for dep in deps {
@@ -86,33 +94,19 @@ fn main() -> anyhow::Result<()> {
                 )
             })?;
 
+        let env = MsBuildEnvironment::get(&vcproj.name, build_cfg, &sln_root);
+
         if !cfg_platform.is_enabled {
-            println!("[{}] [{}]: <disabled>", vcproj.name, build_cfg.name);
+            // println!("[{}] [{}]: <disabled>", vcproj.name, build_cfg.name);
         } else if let Some(cl) = &build_cfg.compiler_tool {
-            let ((c_files, cpp_files), flags) =
-                cl.to_flags(&build_cfg, &vcproj, &cfg_platform.actual_cfg.0);
-            for flag in flags {
-                println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
-            }
+            let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
 
-            if !c_files.is_empty() {
-                println!("C-files:");
-            }
-            for (i, (_, c_files)) in c_files.iter().enumerate() {
-                println!("{i}:");
-                for c_file in c_files {
-                    println!("  {c_file}");
-                }
-            }
-
-            if !cpp_files.is_empty() {
-                println!("CPP-files:");
-            }
-            for (i, (_, c_files)) in cpp_files.iter().enumerate() {
-                println!("{i}:");
-                for c_file in c_files {
-                    println!("  {c_file}");
-                }
+            for (flag, files) in flags_n_files {
+                println!("[{}]: {}", vcproj.name, flag);
+                // println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
+                // for file in files {
+                //     println!("  {file}");
+                // }
             }
         } else {
             println!("[{}] [{}]: <nocomptool>", vcproj.name, build_cfg.name);

@@ -3,6 +3,37 @@ use std::{collections::HashMap, ffi::OsStr, path::Path};
 use anyhow::Context;
 use msvc2008_parser_proc::{ParseXml, flag_enum};
 
+/// MSBuild/Visual Studio macros expanded at build time in .vcxproj files.
+#[derive(Clone, Copy, Debug)]
+pub struct MsBuildEnvironment<'a> {
+    /// Directory of the .sln file, with trailing backslash.
+    /// Example: solution at `C:\projects\App\App.sln` -> `C:\projects\App\`.
+    pub solution_dir: &'a str,
+
+    /// Intermediate output directory (object files, etc.), with trailing backslash.
+    /// Example: `obj\Release\`.
+    pub int_dir: &'a str,
+
+    /// Base name of the source file being compiled (no extension, no path).
+    /// Example: compiling `src\parser.cpp` -> `parser`.
+    pub input_name: &'a str,
+
+    /// Project name (taken from .vcproj configuration).
+    /// Example: `survarium - PC - DirectX 11`
+    pub project_name: &'a str,
+
+    /// Taken from linker `OutputFile` option. If not present defaults to `project_name`.
+    pub target_name: &'a str,
+
+    /// Configuration name.
+    /// Example: `Release` or `Master Gold`.
+    pub configuration_name: &'a str,
+
+    /// Target platform of the current configuration.
+    /// Example: `Win32`, `x64`, `ARM64`.
+    pub platform_name: &'a str,
+}
+
 #[derive(Debug, ParseXml)]
 pub struct VCProject {
     pub name: String,
@@ -11,7 +42,10 @@ pub struct VCProject {
     #[rename("ProjectGUID")]
     pub guid: uuid::Uuid,
     pub root_namespace: String,
-    pub keyword: Option<String>, // TODO: freeimage\LibOpenJPEG\LibOpenJPEG.vcproj
+
+    // TODO: Figure out whether we should care for this flag or not.
+    // Set in `freeimage\LibOpenJPEG\LibOpenJPEG.vcproj`
+    pub keyword: Option<String>,
     pub target_framework_version: String,
 
     #[skip]
@@ -22,24 +56,18 @@ pub struct VCProject {
     pub files: Files,
 }
 
-// TODO: DisableSpecificWarnings can be on files as well:
-//
-// [zlibN][Release|Win32]: /Ob2 /Oi /Ot /Oy /GT /GL /FD /MD /GS- /arch:SSE /fp:fast /W3 /c /Zi /TP /MP       | my
-// [zlibN][Release|Win32]: /Ob2 /Oi /Ot /Oy /GT /GL /FD /MD /GS- /arch:SSE /fp:fast /W3 /c /Zi /TC /wd4996  /MP
-// [zlib][Release|Win32]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /FD /MT /GS- /arch:SSE /fp:fast /W3 /c /Zi /TP /MP    | my
-// [zlib][Release|Win32]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /FD /MT /GS- /arch:SSE /fp:fast /W3 /c /Zi /TC /wd4996  /MP
-// [LibTIFF][Release|Win32]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /GF /FD /MT /GS- /arch:SSE /fp:fast /W3 /c /Zi /MP | my
-// [LibTIFF][Release|Win32]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /GF /FD /MT /GS- /arch:SSE /fp:fast /W3 /c /Zi /wd4996  /MP
-
 #[derive(Debug, ParseXml)]
 pub struct Configuration {
+    /// Example: `Release|Win32`.
     pub name: String,
+
     // Requires interpolation:
     // OutputDirectory="$(SolutionDir)../binaries/$(PlatformName)/intermediates/$(ConfigurationName)/$(ProjectName)"
-    pub output_directory: Option<String>, // TODO: Can be missing in game in random config
+    pub output_directory: Option<String>,
+
     // Requires interpolation:
     // IntermediateDirectory="$(SolutionDir)../binaries/$(PlatformName)/intermediates/$(ConfigurationName)/$(ProjectName)"
-    pub intermediate_directory: Option<String>, // TODO: Same as above
+    pub intermediate_directory: Option<String>,
 
     pub configuration_type: ConfigurationType,
     pub character_set: Option<CharacterSet>,
@@ -55,9 +83,9 @@ pub struct Configuration {
     pub use_of_mfc: Option<UseOfMFC>,
 
     #[skip]
-    pub compiler_tool: Option<CompilerTool>, // TODO: Can be missing for Xbox
+    pub compiler_tool: Option<CompilerTool>,
     #[skip]
-    pub lib_tool: Option<LibTool>, // Should be either lib or linker
+    pub lib_tool: Option<LibTool>,
     #[skip]
     pub linker_tool: Option<LinkerTool>,
 }
@@ -69,10 +97,13 @@ pub struct Platform {
 
 #[derive(Debug, ParseXml, Eq, PartialEq, Hash, Clone, Default)]
 #[parse_xml(
+    merge,
     tag = "VCCLCompilerTool",
     ignore = "Name",
-    ignore = "ExecutionBucket" // u8 -- VS related flag for parallelism. `ogg` and `vorbis` set it to '7'.
-    ignore = "UseUnicodeResponseFiles", // bool -- VS related flag
+    ignore = "ExecutionBucket"              // u8     -- VS related flag for parallelism. `ogg` and `vorbis` set it to '7'.
+    ignore = "UseUnicodeResponseFiles",     // bool   -- VS related flag
+    ignore = "XMLDocumentationFileName",    // String -- Something related to documentation.
+    ignore = "AssemblerListingLocation",    // String -- Set with /Fa flag when `AseemblerOutput` is set, which is not the case here.
 )]
 pub struct CompilerTool {
     pub additional_options: Option<String>,
@@ -85,7 +116,9 @@ pub struct CompilerTool {
     pub favor_size_or_speed: Option<FavorSizeOrSpeed>,
     pub whole_program_optimization: Option<WholeProgramOptimization>,
     pub string_pooling: Option<StringPooling>,
+
     pub exception_handling: Option<ExceptionHandling>,
+
     pub runtime_library: Option<RuntimeLibrary>,
     pub buffer_security_check: Option<BufferSecurityCheck>,
     pub enable_enhanced_instruction_set: Option<EnableEnhancedInstructionSet>,
@@ -110,23 +143,22 @@ pub struct CompilerTool {
     pub suppress_startup_banner: Option<SuppressStartupBanner>,
     pub detect_64_bit_portability_problems: Option<Detect64BitPortabilityProblems>,
 
-    pub object_file: Option<String>,
-    pub program_data_base_file_name: Option<String>,
-    pub assembler_listing_location: Option<String>,
     pub precompiled_header_through: Option<String>,
+
+    pub object_file: Option<String>,
     pub precompiled_header_file: Option<String>,
-    // NOTE: can be ';' or ',' separated depending on project
+    pub program_data_base_file_name: Option<String>,
+
     pub disable_specific_warnings: Option<Vec<String>>,
+
     // Requires interpolation: $(SolutionDir)/stlport;
     pub additional_include_directories: Option<Vec<String>>,
+
     // PreprocessorDefinitions="WIN32;NDEBUG;VOSTOK_STATIC_LIBRARIES;MASTER_GOLD;"
     pub preprocessor_definitions: Option<Vec<String>>,
-
-    #[rename("XMLDocumentationFileName")]
-    pub xml_documentation_file_name: Option<String>,
 }
 
-#[derive(Debug, ParseXml)]
+#[derive(Debug, ParseXml, Default)]
 #[parse_xml(tag = "VCLinkerTool", ignore = "Name")]
 pub struct LinkerTool {
     pub additional_options: Option<String>,
@@ -173,7 +205,7 @@ pub struct LinkerTool {
 pub struct LibTool {
     pub additional_options: Option<String>,
     // Requires interpolation: $(SolutionDir)../binaries/$(PlatformName)/libraries/vostok_$(ProjectName)-static-gold.lib"
-    pub output_file: Option<String>, // TODO: nvidia\nvt\project\squish.vcproj
+    pub output_file: Option<String>,
     pub additional_library_directories: Option<Vec<String>>,
     pub ignore_default_library_names: Option<Vec<String>>,
     pub suppress_startup_banner: Option<SuppressStartupBanner>,
@@ -223,6 +255,7 @@ pub struct FileConfiguration {
 //
 
 flag_enum! {
+    // If new types are added `MsBuildEnvironment::get` should be updated accordingly.
     enum ConfigurationType {
         1 => "exe",
         2 => "dll",
@@ -252,7 +285,7 @@ flag_enum! {
 }
 flag_enum! {
     enum UseOfMFC {
-        -1 => "", // Means not applicable. Set specifically on Xbox (TODO: Requires verification)
+        -1 => "", // Means not applicable. Set specifically on Xbox.
         0 => "",
         1 => "/MFC:static",
         2 => "/MFC:dynamic",
@@ -608,17 +641,46 @@ macro_rules! flags {
     }};
 }
 
-type ResultParse = (
-    HashMap<CompilerTool, Vec<String>>,
-    HashMap<CompilerTool, Vec<String>>,
-);
+type ResultParse = HashMap<CompilerTool, Vec<String>>;
 impl CompilerTool {
     pub fn to_flags(
         &self,
         cfg: &Configuration,
         vcproject: &VCProject,
-        configuration_platform: &str,
-    ) -> (ResultParse, Vec<String>) {
+        env: MsBuildEnvironment,
+    ) -> Vec<(String, Vec<String>)> {
+        let mut result = vec![];
+
+        let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        // "Yc" > "Yu"
+        tool_n_files.sort_by_key(|tool| tool.0.use_precompiled_header);
+        tool_n_files.reverse();
+
+        for (tool, files) in tool_n_files {
+            let mut env = env;
+            if files.len() == 1 {
+                let input_name = Path::new(&files[0])
+                    .file_stem()
+                    .map(|x| x.to_str().expect("Path was constructed from String"))
+                    .unwrap_or(files[0].as_str());
+
+                env.input_name = input_name;
+            } else {
+                env.input_name = "<poison>";
+            }
+
+            let compiler_tool = self.clone().merge(tool);
+            let flags = compiler_tool.to_flags_impl(cfg, env);
+            result.push((flags, files));
+        }
+
+        result
+    }
+
+    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> String {
         let Self {
             additional_options,
             optimization,
@@ -653,87 +715,19 @@ impl CompilerTool {
             suppress_startup_banner,
             detect_64_bit_portability_problems,
             //
-            object_file: _,
-            program_data_base_file_name: _,
-            assembler_listing_location: _,
-            precompiled_header_through,
             precompiled_header_file,
+            object_file,
+            program_data_base_file_name,
+            //
+            precompiled_header_through,
             disable_specific_warnings,
-            additional_include_directories: _,
+            additional_include_directories,
             preprocessor_definitions,
-            xml_documentation_file_name: _,
         } = self;
 
-        if let Some(phf) = precompiled_header_file {
-            println!("phf: '{phf}'")
-        }
-
-        //
-        //
-
-        let whole_program_optimization =
-            match (cfg.whole_program_optimization, whole_program_optimization) {
-                (Some(true), None) => Some(WholeProgramOptimization::_1),
-                _ => *whole_program_optimization,
-            };
-
-        let generate_program_database = match debug_information_format {
-            Some(DebugInformationFormat::_0) | None => None,
-            _ => Some(GenerateProgramDatabase::_1),
-        };
-
-        let compile_only = Some(CompileOnly::_1);
-
-        // TODO: `compile_as` is a bit more complex.
-        // If there are C++ and C files, it will emit two calls (verify!) to the compiler
-        // This is important for dependencies
-        let compile_as = match compile_as {
-            None => Some(CompileAs::_2),
-            _ => *compile_as,
-        };
-
-        // TODO: I'd rather we verified that while parsing.
-        let use_precompiled_header = match (use_precompiled_header, precompiled_header_through) {
-            (Some(use_precompiled_header), Some(precompiled_header_through))
-                if !matches!(*use_precompiled_header, UsePrecompiledHeader::_0) =>
-            {
-                assert_ne!(use_precompiled_header, &UsePrecompiledHeader::_1);
-
-                let mut flag = use_precompiled_header.as_str().to_string();
-                flag.push('"');
-                flag.push_str(precompiled_header_through);
-                flag.push('"');
-                Some(flag)
-            }
-            _ => None,
-        };
-        println!("use_precompiled_header: '{use_precompiled_header:?}'");
-
-        // TODO: default option
-        let exception_handling = Some(
-            exception_handling
-                .as_ref()
-                .unwrap_or(&ExceptionHandling::_1),
-        );
-
-        //
-        //
-
-        let mut result = flags![
-            optimization,
-            inline_function_expansion,
-            enable_intrinsic_functions,
-            favor_size_or_speed,
-            omit_frame_pointers,
-            enable_fiber_safe_optimizations,
-            whole_program_optimization,
-        ];
-
-        let mut preprocessor_definitions = preprocessor_definitions
-            .iter()
-            .flatten()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
+        let mut additional_include_directories =
+            additional_include_directories.clone().unwrap_or_default();
+        let mut preprocessor_definitions = preprocessor_definitions.clone().unwrap_or_default();
 
         if let Some(inherited_property_sheets) = &cfg.inherited_property_sheets {
             let mut vc_version = 0;
@@ -756,47 +750,132 @@ impl CompilerTool {
                         vc_version = 71;
                     }
                     "..\\libogg.vsprops" => {
-                        // TODO
+                        for additional_include_directory in [
+                            r#"..\..\..\..\libogg-1.1.3\include"#, // r#"..\..\..\..\libogg-$(LIBOGG_VERSION)\include"#,
+                            r#"..\..\..\..\ogg\include"#,
+                            r#"..\..\..\..\..\..\..\core\ogg\libogg\include"#,
+                        ] {
+                            additional_include_directories
+                                .push(additional_include_directory.to_string());
+                        }
                     }
-                    _ => unreachable!("TODO"),
+                    _ => unreachable!(
+                        "Requires to properly handle .vsprops files, relative paths and user macro. Currently hardcoded for my cases"
+                    ),
                 }
             }
             match vc_version {
                 0 => (),
-                60 => preprocessor_definitions.push("_VC80_UPGRADE=0x0600"),
-                70 => preprocessor_definitions.push("_VC80_UPGRADE=0x0700"),
-                71 => preprocessor_definitions.push("_VC80_UPGRADE=0x0710"),
+                60 => preprocessor_definitions.push("_VC80_UPGRADE=0x0600".to_string()),
+                70 => preprocessor_definitions.push("_VC80_UPGRADE=0x0700".to_string()),
+                71 => preprocessor_definitions.push("_VC80_UPGRADE=0x0710".to_string()),
                 _ => unreachable!(),
             }
         }
+        //
+        //
+        //
 
-        match cfg.configuration_type {
-            ConfigurationType::_2 => preprocessor_definitions.push("_WINDLL"),
-            _ => (),
-        }
+        let exception_handling = Some(exception_handling.unwrap_or(ExceptionHandling::_1));
+        let precompiled_header_through =
+            precompiled_header_through.as_deref().unwrap_or("stdafx.h");
 
-        if let Some(character_set) = cfg.character_set {
-            match character_set {
-                CharacterSet::_1 => {
-                    preprocessor_definitions.push("_UNICODE");
-                    preprocessor_definitions.push("UNICODE");
-                }
-                CharacterSet::_2 => preprocessor_definitions.push("_MBCS"),
-                _ => (),
+        let whole_program_optimization =
+            match (cfg.whole_program_optimization, whole_program_optimization) {
+                (Some(true), None) => Some(WholeProgramOptimization::_1),
+                _ => *whole_program_optimization,
+            };
+
+        // TODO: This needs to be solved differently. As this can still result in multiple invocations of the compiler.
+        let generate_program_database = match debug_information_format {
+            Some(DebugInformationFormat::_0) | None => None,
+            _ => Some(GenerateProgramDatabase::_1),
+        };
+
+        let compile_only = Some(CompileOnly::_1);
+
+        let use_precompiled_header_flag = match use_precompiled_header {
+            Some(use_precompiled_header)
+                if !matches!(*use_precompiled_header, UsePrecompiledHeader::_0) =>
+            {
+                let mut flag = use_precompiled_header.as_str().to_string();
+                flag.push('"');
+                flag.push_str(precompiled_header_through);
+                flag.push('"');
+                Some(flag)
+            }
+            _ => None,
+        };
+
+        let object_file = object_file.as_deref().unwrap_or("$(IntDir)");
+
+        let precompiled_header_file = match (precompiled_header_file, use_precompiled_header) {
+            (None, Some(use_precompiled_header))
+                if !matches!(*use_precompiled_header, UsePrecompiledHeader::_0) =>
+            {
+                Some("$(IntDir)\\$(TargetName).pch")
+            }
+            _ => precompiled_header_file.as_deref(),
+        };
+
+        let program_data_base_file_name = program_data_base_file_name
+            .as_deref()
+            .unwrap_or("$(IntDir)\\vc90.pdb");
+
+        //
+        //
+        //
+
+        let mut result = flags![
+            optimization,
+            inline_function_expansion,
+            enable_intrinsic_functions,
+            favor_size_or_speed,
+            omit_frame_pointers,
+            enable_fiber_safe_optimizations,
+            whole_program_optimization,
+        ];
+
+        for include_directory in additional_include_directories.iter() {
+            result.push(' ');
+            result.push_str("/I ");
+            if !include_directory.starts_with('"') {
+                result.push('"');
+            }
+            result.push_str(&env.expand(include_directory.trim()));
+            if !include_directory.ends_with('"') {
+                result.push('"');
             }
         }
 
-        if !preprocessor_definitions.is_empty() {
-            result.push(' ');
-        }
+        let preprocessor_definitions = {
+            match cfg.configuration_type {
+                ConfigurationType::_2 => preprocessor_definitions.push("_WINDLL".to_string()),
+                _ => (),
+            }
+
+            if let Some(character_set) = cfg.character_set {
+                match character_set {
+                    CharacterSet::_1 => {
+                        preprocessor_definitions.push("_UNICODE".to_string());
+                        preprocessor_definitions.push("UNICODE".to_string());
+                    }
+                    CharacterSet::_2 => preprocessor_definitions.push("_MBCS".to_string()),
+                    _ => (),
+                }
+            }
+            preprocessor_definitions
+        };
 
         for preprocessor_definition in preprocessor_definitions {
+            result.push(' ');
             result.push_str("/D ");
             result.push('"');
             result.push_str(&preprocessor_definition);
             result.push('"');
-            result.push(' ');
         }
+
+        result.push(' ');
 
         result.push_str(&flags![
             string_pooling,
@@ -808,7 +887,44 @@ impl CompilerTool {
             enable_function_level_linking,
             floating_point_model,
             runtime_type_info,
-            use_precompiled_header,
+            use_precompiled_header_flag,
+        ]);
+
+        // /Fp"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vostok_fs-static-gold.pch"
+        if let Some(precompiled_header_file) = precompiled_header_file {
+            result.push(' ');
+            result.push_str("/Fp");
+            result.push('"');
+            result.push_str(&env.expand(precompiled_header_file));
+            result.push('"');
+        }
+
+        // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
+        if !object_file.is_empty() {
+            let object_file = env.expand(object_file);
+
+            result.push(' ');
+            result.push_str("/Fo");
+            result.push('"');
+            result.push_str(&object_file);
+
+            if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
+                result.push('\\');
+            }
+            result.push('"');
+        }
+
+        // /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vc90.pdb"
+        if !program_data_base_file_name.is_empty() {
+            result.push(' ');
+            result.push_str("/Fd");
+            result.push('"');
+            result.push_str(&env.expand(program_data_base_file_name));
+            result.push('"');
+        }
+        result.push(' ');
+
+        result.push_str(&flags![
             warning_level,
             compile_only,
             debug_information_format,
@@ -829,10 +945,9 @@ impl CompilerTool {
         for disable_specific_warning in disable_specific_warnings.iter().flatten() {
             result.push(' ');
             result.push_str("/wd");
-            result.push_str(&disable_specific_warning);
+            result.push_str(disable_specific_warning);
         }
 
-        // @TODO: Requires correctly handling overrides.
         if let Some(additional_options) = additional_options
             && !additional_options.is_empty()
         {
@@ -846,81 +961,75 @@ impl CompilerTool {
             result.push_str(flag.as_str());
         }
 
-        let file_types = Self::_parse_files(&vcproject.files, configuration_platform);
-
-        (file_types, vec![result])
+        result.trim_start().to_string()
     }
 
-    // @TODO: We only care right now about the compiler
-    fn _parse_files(files: &Files, configuration_platform: &str) -> ResultParse {
-        let mut result = (HashMap::new(), HashMap::new());
+    fn parse_files(files: &Files, configuration_platform: &str) -> ResultParse {
+        let mut result = HashMap::new();
 
         for file in &files.files {
-            _ = Self::_parse_file(&mut result, file, configuration_platform);
+            Self::parse_file(&mut result, file, configuration_platform);
         }
 
         for filter in &files.filters {
-            _ = Self::_parse_filter(&mut result, filter, configuration_platform);
+            Self::parse_filter(&mut result, filter, configuration_platform);
         }
 
         result
     }
 
-    fn _parse_filter(result: &mut ResultParse, filter: &Filter, configuration_platform: &str) {
+    fn parse_filter(result: &mut ResultParse, filter: &Filter, configuration_platform: &str) {
         for file in &filter.files {
-            _ = Self::_parse_file(result, file, configuration_platform);
+            Self::parse_file(result, file, configuration_platform);
         }
 
         for filter in &filter.filters {
-            _ = Self::_parse_filter(result, filter, configuration_platform);
+            Self::parse_filter(result, filter, configuration_platform);
         }
     }
 
-    fn _parse_file(result: &mut ResultParse, file: &File, configuration_platform: &str) {
+    fn parse_file(result: &mut ResultParse, file: &File, configuration_platform: &str) {
         for file in &file.files {
-            _ = Self::_parse_file(result, file, configuration_platform);
+            Self::parse_file(result, file, configuration_platform);
         }
 
-        if file.file_configurations.is_empty() {
-            let map = match Path::new(&file.relative_path)
-                .extension()
-                .map(OsStr::as_encoded_bytes)
-            {
-                Some(b"c") => &mut result.0,
-                Some(b"cpp") => &mut result.1,
-                Some(b"h") => return,
-                _ => {
-                    eprintln!("Couldn't parse extension: {}", file.relative_path);
-                    return;
-                }
-            };
+        let file_extension = Path::new(&file.relative_path)
+            .extension()
+            .map(OsStr::as_encoded_bytes);
 
-            map.entry(CompilerTool::default())
-                .or_default()
-                .push(file.relative_path.clone());
-            return;
-        }
-        for config in &file.file_configurations {
-            if config.name == configuration_platform {
-                let Some(cl_tool) = &config.tool else {
-                    continue;
-                };
-
-                let map = match Path::new(&file.relative_path)
-                    .extension()
-                    .map(OsStr::as_encoded_bytes)
-                {
-                    Some(b"c") => &mut result.0,
-                    Some(b"cpp") => &mut result.1,
-                    Some(b"h") => continue,
-                    _ => unreachable!("Couldn't parse extension: {}", file.relative_path),
-                };
-
-                map.entry(cl_tool.clone())
-                    .or_default()
-                    .push(file.relative_path.clone());
+        let compile_as = match file_extension {
+            Some(b"c") => CompileAs::_1,
+            Some(b"cpp") => CompileAs::_2,
+            Some(
+                b"h" | b"hpp" | b"ico" | b"rc" | b"bmp" | b"avi" | b"ampl" | b"txt" | b"inl"
+                | b"def",
+            ) => return,
+            // "Actually can be any kind of file, but I want to be explicit for vostok project.
+            _ => {
+                eprintln!("Couldn't parse extension: {}", file.relative_path);
+                return;
             }
+        };
+
+        let config = file
+            .file_configurations
+            .iter()
+            .filter(|config| config.name == configuration_platform)
+            .find(|config| config.tool.is_some());
+
+        let mut cl_tool = match config {
+            Some(config) if config.excluded_from_build == Some(true) => return,
+            Some(config) => config.tool.clone(),
+            None => None,
         }
+        .unwrap_or_default();
+
+        cl_tool.compile_as = Some(compile_as);
+
+        result
+            .entry(cl_tool)
+            .or_default()
+            .push(file.relative_path.clone());
     }
 }
 
@@ -1006,12 +1115,18 @@ impl Configuration {
             .filter(|n| n.is_element() && n.tag_name().name() == "Tool")
         {
             match child.attribute("Name") {
-                // TODO
                 Some("VCCLCompilerTool") => {
-                    this.compiler_tool = Some(CompilerTool::parse_xml(child)?)
+                    let compiler_tool = CompilerTool::parse_xml(child)?;
+                    this.compiler_tool = Some(compiler_tool);
                 }
-                Some("VCLibrarianTool") => this.lib_tool = Some(LibTool::parse_xml(child)?),
-                Some("VCLinkerTool") => this.linker_tool = Some(LinkerTool::parse_xml(child)?),
+                Some("VCLibrarianTool") => {
+                    let lib_tool = LibTool::parse_xml(child)?;
+                    this.lib_tool = Some(lib_tool);
+                }
+                Some("VCLinkerTool") => {
+                    let linker_tool = LinkerTool::parse_xml(child)?;
+                    this.linker_tool = Some(linker_tool);
+                }
                 _ => (),
             }
         }
@@ -1101,35 +1216,40 @@ impl FileConfiguration {
 
 #[rustfmt::skip]
 macro_rules! optparse {
-    ($f:ident: bool)   => { let $f = $f.map(parse_bool).transpose()?; };
-    ($f:ident: String) => { let $f = $f.map(str::to_string); };
-    ($f:ident: Vec<_>) => { let $f = $f.map(parse_list); };
-    ($f:ident: $t:ty)  => { let $f = $f.map(|s| s.parse::<$t>()).transpose()?; };
+    ($f:ident: $($t:tt)+) => {
+        let $f = match $f {
+            None => None,
+            Some(s) => {
+                parse!(s: $($t)+);
+                Some(s)
+            }
+        };
+    };
 }
 pub(crate) use optparse;
 
 #[rustfmt::skip]
 macro_rules! parse {
-    ($f:ident: bool)   => { let $f = parse_bool($f)?; };
-    ($f:ident: String) => { let $f = $f.to_string(); };
-    ($f:ident: Vec<_>) => { let $f = parse_list($f); };
-    ($f:ident: $t:ty)  => { let $f = $f.parse::<$t>()?; };
+    ($f:ident: bool)        => { let $f = parse_bool($f)?; };
+    ($f:ident: String)      => { let $f = $f.to_string(); };
+    ($f:ident: Vec<String>) => { let $f = parse_list($f); };
+    ($f:ident: $t:ty)       => { let $f = $f.parse::<$t>()?; };
 }
 pub(crate) use parse;
 
 macro_rules! parse_attrs {
     ($node:expr, $ctx:literal, {
-        $($attr_name:literal => $field:ident,)*
-        $(optional: $attr_name_opt:literal => $field_opt:ident,)*
-        $(ignore: $ignore:literal,)*
+        $(          $attr_name    :literal => $field:ident,                     )*
+        $(optional: $attr_name_opt:literal => $field_opt:ident,                 )*
+        $(ignore:   $attr_name_igr:literal,                                     )*
     }) => {
         $(let mut $field: Option<&str> = None;)*
         $(let mut $field_opt: Option<&str> = None;)*
 
         for attr in $node.attributes() {
             match attr.name() {
-                $($ignore)|*|"" => {}
-                $($attr_name => _ = $field.replace(attr.value()),)*
+                $($attr_name_igr)|*|"" => {}
+                $($attr_name     => _ = $field.replace(attr.value()),)*
                 $($attr_name_opt => _ = $field_opt.replace(attr.value()),)*
                 attr_name => {
                     anyhow::bail!("Unexpected {} attribute: '{attr_name}' with value: '{}'", $ctx, attr.value())
@@ -1159,4 +1279,89 @@ fn parse_list(s: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+//
+//
+//
+
+// SolutionDir=E:\Projects\vostok\sources
+// PlatformName=Win32
+// ConfigurationName=Master Gold
+// ProjectName=network
+
+impl<'a> MsBuildEnvironment<'a> {
+    pub fn get(project_name: &'a str, configuration: &'a Configuration, sln_root: &'a str) -> Self {
+        let (configuration_name, platform_name) = configuration
+            .name
+            .split_once('|')
+            .expect("Configuration should be parsed by sln parser");
+
+        let mut target_name = project_name;
+
+        let mut output_file = None;
+        match configuration.configuration_type {
+            ConfigurationType::_1 | ConfigurationType::_2 => {
+                output_file = configuration
+                    .linker_tool
+                    .as_ref()
+                    .and_then(|linker| linker.output_file.as_deref());
+            }
+            ConfigurationType::_4 => {
+                output_file = configuration
+                    .lib_tool
+                    .as_ref()
+                    .and_then(|lib| lib.output_file.as_deref());
+            }
+            _ => (),
+        }
+        if let Some(output_file) = output_file {
+            target_name = Path::new(output_file)
+                .file_stem()
+                .expect("Output file must have stem")
+                .to_str()
+                .expect("Path was constructed from String")
+        }
+
+        let int_dir = configuration
+            .intermediate_directory
+            .as_deref()
+            .expect("For my case is always present");
+
+        Self {
+            solution_dir: sln_root,
+            int_dir,
+            input_name: "", // input_name is set per file basis
+            project_name,
+            target_name,
+            configuration_name,
+            platform_name,
+        }
+    }
+
+    pub fn expand(&self, input: &str) -> String {
+        let Self {
+            // Location of .sln file
+            solution_dir,
+            // IntermediateDirectory from Configuration
+            int_dir,
+            input_name,
+            project_name,
+            //
+            target_name,
+            configuration_name,
+            platform_name,
+        } = self;
+
+        input
+            // IntermediateDirectory="$(SolutionDir)../binaries/$(PlatformName)/intermediates/$(ConfigurationName)/$(ProjectName)"
+            .replace("$(IntDir)", int_dir)
+            // OutputFile="$(SolutionDir)../binaries/$(PlatformName)/survarium-dx11-win32-dynamic.exe"
+            .replace("$(TargetName)", target_name)
+            .replace("$(InputName)", input_name)
+            .replace("$(ProjectName)", project_name)
+            .replace("$(ConfigurationName)", configuration_name)
+            .replace("$(PlatformName)", platform_name)
+            .replace("$(SolutionDir)", solution_dir)
+    }
 }
