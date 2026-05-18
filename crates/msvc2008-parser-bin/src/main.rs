@@ -9,7 +9,7 @@ use clap::Parser;
 
 use msvc2008_parser_lib::{
     sln,
-    vcproj::{self, MsBuildEnvironment},
+    vcproj::{self, ConfigurationType, MsBuildEnvironment},
 };
 
 #[derive(clap::Parser)]
@@ -104,14 +104,28 @@ fn main() -> anyhow::Result<()> {
             .compiler_tool
             .as_ref()
             .context("Only xbox configurations do not have a compiler enabled")?;
-        let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
 
-        for (flag, files) in flags_n_files {
-            println!("[{}]: {}", vcproj.name, flag);
-            // println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
-            // for file in files {
-            //     println!("  {file}");
-            // }
+        // let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
+        // for (flag, files) in flags_n_files {
+        //     println!("[{}]: {}", vcproj.name, flag);
+        //      println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
+        //      for file in files {
+        //          println!("  {file}");
+        //      }
+        // }
+
+        match build_cfg.configuration_type {
+            ConfigurationType::_4 => {
+                let lib_tool = build_cfg.lib_tool.as_ref().with_context(|| {
+                    format!(
+                        "Failed to find lib tool for library configuration: {}",
+                        vcproj.name
+                    )
+                })?;
+                let flags = lib_tool.to_flags(build_cfg, &vcproj, env);
+                println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flags);
+            }
+            _ => (),
         }
     }
 

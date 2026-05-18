@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::{collections::HashMap, ffi::OsStr, path::Path};
 
 use anyhow::Context;
@@ -13,6 +14,9 @@ pub struct MsBuildEnvironment<'a> {
     /// Intermediate output directory (object files, etc.), with trailing backslash.
     /// Example: `obj\Release\`.
     pub int_dir: &'a str,
+
+    // TODO
+    pub out_dir: &'a str,
 
     /// Base name of the source file being compiled (no extension, no path).
     /// Example: compiling `src\parser.cpp` -> `parser`.
@@ -1071,6 +1075,69 @@ impl CompilerTool {
     }
 }
 
+impl LibTool {
+    pub fn to_flags(
+        &self,
+        cfg: &Configuration,
+        vcproject: &VCProject,
+        env: MsBuildEnvironment,
+    ) -> String {
+        let Self {
+            additional_options,
+            output_file,
+            additional_library_directories,
+            ignore_default_library_names,
+            suppress_startup_banner: _,
+        } = self;
+
+        let output_file = output_file
+            .as_deref()
+            .unwrap_or("$(OutDir)\\$(ProjectName).lib");
+
+        let mut result = String::new();
+
+        let out_file = env.expand(output_file);
+        let out_file = out_file.trim().trim_matches('"');
+        write!(result, " /OUT:\"{out_file}\"").unwrap();
+
+        for lib_path in additional_library_directories
+            .iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+        {
+            let lib_path = env.expand(lib_path);
+            let lib_path = lib_path.trim().trim_matches('"');
+
+            write!(result, " /LIBPATH:\"{lib_path}\"").unwrap();
+        }
+
+        for lib_path in ignore_default_library_names
+            .iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+        {
+            let lib_path = env.expand(lib_path);
+            let lib_path = lib_path.trim().trim_matches('"');
+
+            write!(result, " /NODEFAULTLIB:\"{lib_path}\"").unwrap();
+        }
+
+        if matches!(cfg.whole_program_optimization, Some(true)) {
+            result.push(' ');
+            result.push_str("/LTCG");
+        }
+
+        if let Some(additional_options) = additional_options
+            && !additional_options.is_empty()
+        {
+            result.push(' ');
+            result.push_str(additional_options);
+        }
+
+        result
+    }
+}
+
 //
 // Custom parser logic
 //
@@ -1384,9 +1451,15 @@ impl<'a> MsBuildEnvironment<'a> {
             .as_deref()
             .expect("For my case is always present");
 
+        let out_dir = configuration
+            .output_directory
+            .as_deref()
+            .unwrap_or("$(SolutionDir)$(ConfigurationName)");
+
         Self {
             solution_dir: sln_root,
             int_dir,
+            out_dir,
             input_name: "", // input_name is set per file basis
             project_name,
             target_name,
@@ -1401,6 +1474,7 @@ impl<'a> MsBuildEnvironment<'a> {
             solution_dir,
             // IntermediateDirectory from Configuration
             int_dir,
+            out_dir,
             input_name,
             project_name,
             //
@@ -1412,9 +1486,11 @@ impl<'a> MsBuildEnvironment<'a> {
         input
             // IntermediateDirectory="$(SolutionDir)../binaries/$(PlatformName)/intermediates/$(ConfigurationName)/$(ProjectName)"
             .replace("$(IntDir)", int_dir)
+            .replace("$(OutDir)", out_dir)
             // OutputFile="$(SolutionDir)../binaries/$(PlatformName)/survarium-dx11-win32-dynamic.exe"
             .replace("$(TargetName)", target_name)
             .replace("$(InputName)", input_name)
+            //
             .replace("$(ProjectName)", project_name)
             .replace("$(ConfigurationName)", configuration_name)
             .replace("$(PlatformName)", platform_name)
