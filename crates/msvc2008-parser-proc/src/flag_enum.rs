@@ -158,7 +158,7 @@ pub fn flag_enum(input: proc_macro::TokenStream) -> syn::Result<proc_macro2::Tok
 
             #parse_fn
 
-            fn as_str(&self) -> &'static str {
+            pub fn as_str(&self) -> &'static str {
                 match self.0 {
                     #as_str_arms
                     _ => unreachable!(),

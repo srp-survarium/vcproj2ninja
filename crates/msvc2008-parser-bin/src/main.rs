@@ -97,19 +97,21 @@ fn main() -> anyhow::Result<()> {
         let env = MsBuildEnvironment::get(&vcproj.name, build_cfg, &sln_root);
 
         if !cfg_platform.is_enabled {
-            // println!("[{}] [{}]: <disabled>", vcproj.name, build_cfg.name);
-        } else if let Some(cl) = &build_cfg.compiler_tool {
-            let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
+            continue;
+        }
 
-            for (flag, files) in flags_n_files {
-                println!("[{}]: {}", vcproj.name, flag);
-                // println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
-                // for file in files {
-                //     println!("  {file}");
-                // }
-            }
-        } else {
-            println!("[{}] [{}]: <nocomptool>", vcproj.name, build_cfg.name);
+        let cl = build_cfg
+            .compiler_tool
+            .as_ref()
+            .context("Only xbox configurations do not have a compiler enabled")?;
+        let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
+
+        for (flag, files) in flags_n_files {
+            println!("[{}]: {}", vcproj.name, flag);
+            // println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
+            // for file in files {
+            //     println!("  {file}");
+            // }
         }
     }
 

@@ -49,12 +49,16 @@ impl syn::parse::Parse for ParseXmlAttr {
 struct FieldAttr {
     skip: bool,
     rename: Option<String>,
+    unset: Option<proc_macro2::TokenStream>,
+    append: bool,
 }
 
 impl FieldAttr {
     fn parse(field: &syn::Field) -> syn::Result<Self> {
         let mut skip = false;
         let mut rename = None;
+        let mut unset = None;
+        let mut append = false;
 
         for attr in &field.attrs {
             if attr.path().is_ident("skip") {
@@ -62,10 +66,20 @@ impl FieldAttr {
             } else if attr.path().is_ident("rename") {
                 let value: LitStr = attr.parse_args()?;
                 rename = Some(value.value());
+            } else if attr.path().is_ident("unset") {
+                let value: proc_macro2::TokenStream = attr.parse_args()?;
+                unset = Some(value);
+            } else if attr.path().is_ident("append") {
+                append = true;
             }
         }
 
-        Ok(Self { skip, rename })
+        Ok(Self {
+            skip,
+            rename,
+            unset,
+            append,
+        })
     }
 }
 
@@ -78,7 +92,12 @@ enum FieldKind<'a> {
 
 impl<'a> FieldKind<'a> {
     fn classify(field: &'a syn::Field, field_attr: &'a FieldAttr) -> Self {
-        let FieldAttr { skip, rename: _ } = field_attr;
+        let FieldAttr {
+            skip,
+            rename: _,
+            unset: _,
+            append: _,
+        } = field_attr;
 
         if *skip {
             return FieldKind::Skipped;
@@ -180,11 +199,34 @@ pub fn derive_parse_xml(input: syn::DeriveInput) -> syn::Result<proc_macro2::Tok
                         },
                     });
                 }
-                _ => {
-                    merge_fields.extend(quote! {
-                        #field_name: rhs.#field_name.or(self.#field_name),
-                    });
-                }
+                _ => match field_attr.unset {
+                    Some(unset_value) => {
+                        merge_fields.extend(quote! {
+                            #field_name: {
+                                let mut value = rhs.#field_name.or(self.#field_name);
+                                if matches!(value, Some(#unset_value)) {
+                                    value = None;
+                                }
+                                value
+                            },
+                        });
+                    }
+                    None => match field_attr.append {
+                        true => merge_fields.extend(quote! {
+                            #field_name: match (rhs.#field_name, self.#field_name) {
+                                (Some(mut rhs_field), Some(lhs_field)) => {
+                                    rhs_field.push(' ');
+                                    rhs_field.push_str(&lhs_field);
+                                    Some(rhs_field)
+                                }
+                                (rhs_field, lhs_field) => rhs_field.or(lhs_field),
+                            },
+                        }),
+                        false => merge_fields.extend(quote! {
+                            #field_name: rhs.#field_name.or(self.#field_name),
+                        }),
+                    },
+                },
             },
         }
     }

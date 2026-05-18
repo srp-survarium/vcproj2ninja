@@ -106,6 +106,7 @@ pub struct Platform {
     ignore = "AssemblerListingLocation",    // String -- Set with /Fa flag when `AseemblerOutput` is set, which is not the case here.
 )]
 pub struct CompilerTool {
+    #[append]
     pub additional_options: Option<String>,
 
     pub optimization: Option<Optimization>,
@@ -137,7 +138,10 @@ pub struct CompilerTool {
     pub calling_convention: Option<CallingConvention>,
     pub floating_point_exceptions: Option<FloatingPointExceptions>,
     pub force_conformance_in_for_loop_scope: Option<ForceConformanceInForLoopScope>,
+
+    #[unset(GeneratePreprocessedFile::_0)]
     pub generate_preprocessed_file: Option<GeneratePreprocessedFile>,
+
     pub show_includes: Option<ShowIncludes>,
     pub struct_member_alignment: Option<StructMemberAlignment>,
     pub suppress_startup_banner: Option<SuppressStartupBanner>,
@@ -641,7 +645,6 @@ macro_rules! flags {
     }};
 }
 
-type ResultParse = HashMap<CompilerTool, Vec<String>>;
 impl CompilerTool {
     pub fn to_flags(
         &self,
@@ -653,11 +656,13 @@ impl CompilerTool {
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
             .into_iter()
+            .map(|(k, v)| (self.clone().merge(k), v))
+            .collect::<HashMap<_, _>>()
+            .into_iter()
             .collect::<Vec<_>>();
 
         // "Yc" > "Yu"
-        tool_n_files.sort_by_key(|tool| tool.0.use_precompiled_header);
-        tool_n_files.reverse();
+        tool_n_files.sort_by_key(|tool| std::cmp::Reverse(tool.0.use_precompiled_header));
 
         for (tool, files) in tool_n_files {
             let mut env = env;
@@ -672,8 +677,7 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
-            let compiler_tool = self.clone().merge(tool);
-            let flags = compiler_tool.to_flags_impl(cfg, env);
+            let flags = tool.to_flags_impl(cfg, env);
             result.push((flags, files));
         }
 
@@ -836,7 +840,10 @@ impl CompilerTool {
             whole_program_optimization,
         ];
 
-        for include_directory in additional_include_directories.iter() {
+        for include_directory in additional_include_directories
+            .iter()
+            .filter(|s| !s.is_empty())
+        {
             result.push(' ');
             result.push_str("/I ");
             if !include_directory.starts_with('"') {
@@ -867,7 +874,7 @@ impl CompilerTool {
             preprocessor_definitions
         };
 
-        for preprocessor_definition in preprocessor_definitions {
+        for preprocessor_definition in preprocessor_definitions.iter().filter(|s| !s.is_empty()) {
             result.push(' ');
             result.push_str("/D ");
             result.push('"');
@@ -891,7 +898,9 @@ impl CompilerTool {
         ]);
 
         // /Fp"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vostok_fs-static-gold.pch"
-        if let Some(precompiled_header_file) = precompiled_header_file {
+        if let Some(precompiled_header_file) = precompiled_header_file
+            && !precompiled_header_file.is_empty()
+        {
             result.push(' ');
             result.push_str("/Fp");
             result.push('"');
@@ -908,6 +917,13 @@ impl CompilerTool {
             result.push('"');
             result.push_str(&object_file);
 
+            // TODO: Incorrect because of two reasons.
+            // msbuild doesn't actually match on extension. It does it somehow differently:
+            // Fo"E:\Projects\vostok\sources\/../binaries/Win32/intermediates/Release (static)/lua.5.1.4\"
+            //
+            // Here extension would be .4, which is wrong :)
+            //
+            // Also / as an end counts, not just \.
             if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
                 result.push('\\');
             }
@@ -942,7 +958,11 @@ impl CompilerTool {
             detect_64_bit_portability_problems,
         ]);
 
-        for disable_specific_warning in disable_specific_warnings.iter().flatten() {
+        for disable_specific_warning in disable_specific_warnings
+            .iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+        {
             result.push(' ');
             result.push_str("/wd");
             result.push_str(disable_specific_warning);
@@ -964,7 +984,10 @@ impl CompilerTool {
         result.trim_start().to_string()
     }
 
-    fn parse_files(files: &Files, configuration_platform: &str) -> ResultParse {
+    fn parse_files(
+        files: &Files,
+        configuration_platform: &str,
+    ) -> HashMap<CompilerTool, Vec<String>> {
         let mut result = HashMap::new();
 
         for file in &files.files {
@@ -978,7 +1001,11 @@ impl CompilerTool {
         result
     }
 
-    fn parse_filter(result: &mut ResultParse, filter: &Filter, configuration_platform: &str) {
+    fn parse_filter(
+        result: &mut HashMap<CompilerTool, Vec<String>>,
+        filter: &Filter,
+        configuration_platform: &str,
+    ) {
         for file in &filter.files {
             Self::parse_file(result, file, configuration_platform);
         }
@@ -988,7 +1015,11 @@ impl CompilerTool {
         }
     }
 
-    fn parse_file(result: &mut ResultParse, file: &File, configuration_platform: &str) {
+    fn parse_file(
+        result: &mut HashMap<CompilerTool, Vec<String>>,
+        file: &File,
+        configuration_platform: &str,
+    ) {
         for file in &file.files {
             Self::parse_file(result, file, configuration_platform);
         }
@@ -997,6 +1028,13 @@ impl CompilerTool {
             .extension()
             .map(OsStr::as_encoded_bytes);
 
+        // TODO: This is actually incorrect. Because sometimes msbuild doesn't set anything:
+        //
+        // [LibJPEG]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /I "..\zlib" /D "WIN32" /D "NDEBUG" /D "_LIB" /D "_CRT_SECURE_NO_DEPRECATE" /D "_VC80_UPGRADE=0x0710" /D "_MBCS" /GF /FD /MT /GS- /arch:SSE /fp:fast /Fp".\Release/LibJPEG.pch" /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/LibJPEG\" /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/LibJPEG\vc90.pdb" /W3 /c /Zi  /MP
+        // [LibPNG]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /I "E:\Projects\vostok\sources\" /D "WIN32" /D "NDEBUG" /D "_LIB" /D "_CRT_SECURE_NO_DEPRECATE" /D "_VC80_UPGRADE=0x0710" /D "_MBCS" /GF /FD /MT /GS- /arch:SSE /fp:fast /Fp".\Release/LibPNG.pch" /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/LibPNG\" /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/LibPNG\vc90.pdb" /W3 /c /Zi  /MP
+        // [LibTIFF]: /O2 /Ob2 /Oi /Ot /Oy /GT /GL /I "..\libtiff\libtiff" /I "E:\Projects\vostok\sources\" /D "WIN32" /D "NDEBUG" /D "_LIB" /D "_CRT_SECURE_NO_DEPRECATE" /D "_VC80_UPGRADE=0x0710" /D "_MBCS" /GF /FD /MT /GS- /arch:SSE /fp:fast /Fp".\Release/LibTIFF.pch" /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/LibTIFF\" /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/LibTIFF\vc90.pdb" /W3 /c /Zi  /MP
+        //
+        // We are relying on it to always be set though
         let compile_as = match file_extension {
             Some(b"c") => CompileAs::_1,
             Some(b"cpp") => CompileAs::_2,
@@ -1239,9 +1277,9 @@ pub(crate) use parse;
 
 macro_rules! parse_attrs {
     ($node:expr, $ctx:literal, {
-        $(          $attr_name    :literal => $field:ident,                     )*
-        $(optional: $attr_name_opt:literal => $field_opt:ident,                 )*
-        $(ignore:   $attr_name_igr:literal,                                     )*
+        $(          $attr_name    :literal => $field:ident,    )*
+        $(optional: $attr_name_opt:literal => $field_opt:ident,)*
+        $(ignore:   $attr_name_igr:literal,                    )*
     }) => {
         $(let mut $field: Option<&str> = None;)*
         $(let mut $field_opt: Option<&str> = None;)*
@@ -1275,10 +1313,28 @@ fn parse_bool(s: &str) -> anyhow::Result<bool> {
 }
 
 fn parse_list(s: &str) -> Vec<String> {
-    s.split([';', ','])
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    // Note that we do not remove empty strings from here!
+    //
+    // This is important, since even if the resulting arguments will be the same,
+    // msbuild will still separate them into two compiler invocations if there are empty strings.
+    //
+    // For example:
+    // ```
+    // <File
+    // 	RelativePath="OPC_BaseModel.cpp"
+    // 	>
+    // 	<FileConfiguration
+    // 		Name="Release|Win32"
+    // 		>
+    // 		<Tool
+    // 			Name="VCCLCompilerTool"
+    // 			PreprocessorDefinitions=""
+    // 		/>
+    // 	</FileConfiguration>
+    // 	...
+    // ```
+    // This file will be compiled separately by the compiler.
+    s.split([';', ',']).map(str::to_string).collect()
 }
 
 //
