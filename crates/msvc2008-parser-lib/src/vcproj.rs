@@ -1078,6 +1078,7 @@ impl CompilerTool {
 impl LibTool {
     pub fn to_flags(
         &self,
+        sln_path: &str,
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
@@ -1132,6 +1133,51 @@ impl LibTool {
         {
             result.push(' ');
             result.push_str(additional_options);
+        }
+
+        let int_dir= canon(&env.expand(env.int_dir));
+
+        fn canon(s: &String) -> String {
+            let mut parts = Vec::new();
+            for part in s.split(['\\', '/']) {
+                match part {
+                    ".." => { parts.pop(); },
+                    "." | "" => {},
+                    p => parts.push(p),
+                }
+            }
+            parts.join("\\")
+        }
+
+        /// counts how many ".." to prepend.
+        fn count_dublics(s: &str) -> usize {
+            s.split(['\\', '/']).filter(|p| !p.is_empty()).count()
+        }
+
+        fn fill_dublics(c: usize) -> String {
+            (0..c).map(|_| ".." ).intersperse("\\").collect::<String>()
+        }
+
+        let all_files: Vec<String> = CompilerTool::parse_files(&vcproject.files, &cfg.name)
+              .into_values()
+              .flatten()
+              .collect();
+
+        let mut objs: Vec<String> = all_files
+          .iter()
+          .filter_map(|f| {
+              let stem = f.rsplit(['\\', '/']).next()?;
+              let stem = stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem);
+              Some(format!("{int_dir}\\{stem}.obj"))
+          })
+          .collect();
+
+        write!(result, "\n").unwrap();
+        objs.sort();
+        for obj in objs {
+            let mut s = fill_dublics(count_dublics(&sln_path));
+            s.push_str(obj.split_once("vostok").unwrap().1);
+            write!(result, "{s}\n").unwrap();
         }
 
         result
