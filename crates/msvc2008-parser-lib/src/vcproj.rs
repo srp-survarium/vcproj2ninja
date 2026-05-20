@@ -1,8 +1,11 @@
 use std::fmt::Write;
+use std::path::PathBuf;
 use std::{collections::HashMap, ffi::OsStr, path::Path};
 
 use anyhow::Context;
 use msvc2008_parser_proc::{ParseXml, flag_enum};
+
+use crate::utils::pathdiff;
 
 /// MSBuild/Visual Studio macros expanded at build time in .vcxproj files.
 #[derive(Clone, Copy, Debug)]
@@ -12,7 +15,7 @@ pub struct MsBuildEnvironment<'a> {
     pub solution_dir: &'a str,
 
     /// Intermediate output directory (object files, etc.), with trailing backslash.
-    /// Example: `obj\Release\`.
+    /// Example: `E:\Projects\vostok\binaries\Win32\intermediates\Release (static)\script`
     pub int_dir: &'a str,
 
     // TODO
@@ -882,7 +885,7 @@ impl CompilerTool {
             result.push(' ');
             result.push_str("/D ");
             result.push('"');
-            result.push_str(&preprocessor_definition);
+            result.push_str(preprocessor_definition);
             result.push('"');
         }
 
@@ -994,12 +997,12 @@ impl CompilerTool {
     ) -> HashMap<CompilerTool, Vec<String>> {
         let mut result = HashMap::new();
 
-        for file in &files.files {
-            Self::parse_file(&mut result, file, configuration_platform);
-        }
-
         for filter in &files.filters {
             Self::parse_filter(&mut result, filter, configuration_platform);
+        }
+
+        for file in &files.files {
+            Self::parse_file(&mut result, file, configuration_platform);
         }
 
         result
@@ -1010,12 +1013,12 @@ impl CompilerTool {
         filter: &Filter,
         configuration_platform: &str,
     ) {
-        for file in &filter.files {
-            Self::parse_file(result, file, configuration_platform);
-        }
-
         for filter in &filter.filters {
             Self::parse_filter(result, filter, configuration_platform);
+        }
+
+        for file in &filter.files {
+            Self::parse_file(result, file, configuration_platform);
         }
     }
 
@@ -1078,7 +1081,7 @@ impl CompilerTool {
 impl LibTool {
     pub fn to_flags(
         &self,
-        sln_path: &str,
+        vcproj_rpath: &str,
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
@@ -1135,52 +1138,101 @@ impl LibTool {
             result.push_str(additional_options);
         }
 
-        let int_dir= canon(&env.expand(env.int_dir));
+        Self::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env, &mut result);
 
-        fn canon(s: &String) -> String {
-            let mut parts = Vec::new();
-            for part in s.split(['\\', '/']) {
-                match part {
-                    ".." => { parts.pop(); },
-                    "." | "" => {},
-                    p => parts.push(p),
-                }
+        result
+    }
+
+    pub fn file_flags(
+        files: &Files,
+        configuration_platform: &str,
+        vcproj_rpath: &str,
+        env: MsBuildEnvironment,
+        result: &mut String,
+    ) {
+        let vcproj_dir = {
+            let mut vcproj_dir = Path::new(env.solution_dir).to_path_buf();
+            for part in Path::new(vcproj_rpath) {
+                vcproj_dir.push(part);
             }
-            parts.join("\\")
+            let mut vcproj_dir = vcproj_dir.normalize_lexically().unwrap();
+            vcproj_dir.pop();
+            vcproj_dir
+        };
+        let int_dir = PathBuf::from(env.expand(env.int_dir));
+
+        let int_rpath = pathdiff(&vcproj_dir, &int_dir);
+
+        let source_files = Self::parse_files(files, configuration_platform)
+            .into_iter()
+            .map(|source_file| Path::new(source_file).file_name().unwrap());
+
+        let mut int_rpath = int_rpath;
+        let base_len = int_rpath.as_os_str().as_encoded_bytes().len();
+
+        for source_file in source_files {
+            int_rpath.as_mut_os_string().truncate(base_len);
+
+            int_rpath.push(source_file);
+            int_rpath.set_extension("obj");
+            write!(result, "\n{}", int_rpath.to_str().unwrap()).unwrap();
+        }
+    }
+
+    pub fn parse_files<'a>(files: &'a Files, configuration_platform: &str) -> Vec<&'a str> {
+        let mut result = vec![];
+
+        for filter in &files.filters {
+            Self::parse_filter(&mut result, filter, configuration_platform);
         }
 
-        /// counts how many ".." to prepend.
-        fn count_dublics(s: &str) -> usize {
-            s.split(['\\', '/']).filter(|p| !p.is_empty()).count()
-        }
-
-        fn fill_dublics(c: usize) -> String {
-            (0..c).map(|_| ".." ).intersperse("\\").collect::<String>()
-        }
-
-        let all_files: Vec<String> = CompilerTool::parse_files(&vcproject.files, &cfg.name)
-              .into_values()
-              .flatten()
-              .collect();
-
-        let mut objs: Vec<String> = all_files
-          .iter()
-          .filter_map(|f| {
-              let stem = f.rsplit(['\\', '/']).next()?;
-              let stem = stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem);
-              Some(format!("{int_dir}\\{stem}.obj"))
-          })
-          .collect();
-
-        write!(result, "\n").unwrap();
-        objs.sort();
-        for obj in objs {
-            let mut s = fill_dublics(count_dublics(&sln_path));
-            s.push_str(obj.split_once("vostok").unwrap().1);
-            write!(result, "{s}\n").unwrap();
+        for file in &files.files {
+            Self::parse_file(&mut result, file, configuration_platform);
         }
 
         result
+    }
+
+    fn parse_filter<'a>(
+        result: &mut Vec<&'a str>,
+        filter: &'a Filter,
+        configuration_platform: &str,
+    ) {
+        for filter in &filter.filters {
+            Self::parse_filter(result, filter, configuration_platform);
+        }
+
+        for file in &filter.files {
+            Self::parse_file(result, file, configuration_platform);
+        }
+    }
+
+    fn parse_file<'a>(result: &mut Vec<&'a str>, file: &'a File, configuration_platform: &str) {
+        for file in &file.files {
+            Self::parse_file(result, file, configuration_platform);
+        }
+
+        let file_extension = Path::new(&file.relative_path)
+            .extension()
+            .map(OsStr::as_encoded_bytes);
+
+        match file_extension {
+            Some(b"c" | b"cpp") => (),
+            _ => return,
+        };
+
+        let config = file
+            .file_configurations
+            .iter()
+            .filter(|config| config.name == configuration_platform)
+            .find(|config| config.tool.is_some());
+
+        match config {
+            Some(config) if config.excluded_from_build == Some(true) => return,
+            _ => (),
+        }
+
+        result.push(&file.relative_path);
     }
 }
 

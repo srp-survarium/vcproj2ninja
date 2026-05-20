@@ -122,8 +122,8 @@ fn main() -> anyhow::Result<()> {
                         vcproj.name
                     )
                 })?;
-                let flags = lib_tool.to_flags(&dep.path, build_cfg,  &vcproj, env);
-                println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flags);
+                let flags = lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
+                println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, flags);
             }
             _ => (),
         }

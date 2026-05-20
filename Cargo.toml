@@ -13,6 +13,7 @@ edition = "2024"
 [workspace.lints.clippy]
 single_match = "allow"
 collapsible_if = "allow"
+while_let_loop = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
