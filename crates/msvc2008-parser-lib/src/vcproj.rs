@@ -1152,22 +1152,21 @@ impl LibTool {
     ) {
         let vcproj_dir = {
             let mut vcproj_dir = Path::new(env.solution_dir).to_path_buf();
-            for part in Path::new(vcproj_rpath) {
-                vcproj_dir.push(part);
+            for vcproj_part in Path::new(vcproj_rpath).components() {
+                vcproj_dir.push(vcproj_part);
             }
+
             let mut vcproj_dir = vcproj_dir.normalize_lexically().unwrap();
             vcproj_dir.pop();
             vcproj_dir
         };
         let int_dir = PathBuf::from(env.expand(env.int_dir));
 
-        let int_rpath = pathdiff(&vcproj_dir, &int_dir);
-
         let source_files = Self::parse_files(files, configuration_platform)
             .into_iter()
             .map(|source_file| Path::new(source_file).file_name().unwrap());
 
-        let mut int_rpath = int_rpath;
+        let mut int_rpath = pathdiff(&vcproj_dir, &int_dir);
         let base_len = int_rpath.as_os_str().as_encoded_bytes().len();
 
         for source_file in source_files {
@@ -1175,7 +1174,7 @@ impl LibTool {
 
             int_rpath.push(source_file);
             int_rpath.set_extension("obj");
-            write!(result, "\n{}", int_rpath.to_str().unwrap()).unwrap();
+            write!(result, "\n\"{}\"", int_rpath.to_str().unwrap()).unwrap();
         }
     }
 
