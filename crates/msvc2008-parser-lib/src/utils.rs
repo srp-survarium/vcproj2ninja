@@ -23,7 +23,7 @@ pub fn pathdiff(vcproj_dir: &Path, int_dir: &Path) -> PathBuf {
     let vcproj_parts_unmatched_count = vcproj_parts.clone().count();
     let mut int_rpath = match vcproj_parts_unmatched_count {
         0 => PathBuf::from(".\\"),
-        _ => fill_dotdot(vcproj_parts_unmatched_count),
+        _ => std::iter::repeat_n("..", vcproj_parts_unmatched_count).collect::<PathBuf>(),
     };
     for int_part in int_parts {
         int_rpath.push(int_part);
@@ -40,10 +40,6 @@ fn pathdiff_works() {
     assert_eq!(diff("/a/b/c", "/a/b/c"), PathBuf::from(".\\"));
     assert_eq!(diff("/a/b", "/a/b/c/d"), PathBuf::from(".\\c\\d"));
     assert_eq!(diff("/a/b/c/d", "/a/b"), PathBuf::from("../.."));
-}
-
-pub fn fill_dotdot(c: usize) -> PathBuf {
-    std::iter::repeat_n("..", c).collect::<PathBuf>()
 }
 
 pub fn canonize_path(s: &str) -> String {
