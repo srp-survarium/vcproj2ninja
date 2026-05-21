@@ -7,10 +7,8 @@ use std::path::Path;
 use anyhow::Context;
 use clap::Parser;
 
-use msvc2008_parser_lib::{
-    sln,
-    vcproj::{self, ConfigurationType, MsBuildEnvironment},
-};
+use vs2008_parser_lib::vcproj::{ConfigurationType, MsBuildEnvironment};
+use vs2008_parser_lib::{sln, vcproj};
 
 #[derive(clap::Parser)]
 pub struct Cli {

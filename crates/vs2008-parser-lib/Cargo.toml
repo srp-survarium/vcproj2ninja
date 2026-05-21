@@ -1,5 +1,5 @@
 [package]
-name = "msvc2008-parser-lib"
+name = "vs2008-parser-lib"
 version = { workspace = true }
 edition = { workspace = true }
 
@@ -14,4 +14,4 @@ nom = { workspace = true }
 roxmltree = { workspace = true }
 uuid = { workspace = true }
 
-msvc2008-parser-proc = { workspace = true }
+vs2008-parser-proc = { workspace = true }

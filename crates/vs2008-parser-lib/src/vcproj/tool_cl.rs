@@ -1,4 +1,4 @@
-use msvc2008_parser_proc::{ParseXml, flag_enum};
+use vs2008_parser_proc::{ParseXml, flag_enum};
 
 use super::macros::*;
 use super::{CharacterSet, ConfigurationType};

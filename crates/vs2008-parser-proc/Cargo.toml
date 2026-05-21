@@ -1,5 +1,5 @@
 [package]
-name = "msvc2008-parser-proc"
+name = "vs2008-parser-proc"
 version = { workspace = true }
 edition = { workspace = true }
 

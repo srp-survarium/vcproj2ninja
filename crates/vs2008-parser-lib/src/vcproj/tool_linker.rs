@@ -1,11 +1,11 @@
-use std::path::Path;
-
-use msvc2008_parser_proc::{flag_enum, ParseXml};
+use vs2008_parser_proc::{flag_enum, ParseXml};
 
 use super::macros::*;
 use super::utils;
 use super::ConfigurationType;
 use super::{Configuration, LibTool, MsBuildEnvironment, VCProject};
+
+use std::path::Path;
 
 #[derive(Debug, ParseXml, Default)]
 #[parse_xml(tag = "VCLinkerTool", ignore = "Name")]
