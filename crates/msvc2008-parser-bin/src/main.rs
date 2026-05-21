@@ -100,10 +100,12 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let cl = build_cfg
-            .compiler_tool
-            .as_ref()
-            .context("Only xbox configurations do not have a compiler enabled")?;
+        let _cl = build_cfg.compiler_tool.as_ref().with_context(|| {
+            format!(
+                "Only xbox configurations do not have a compiler enabled: {}",
+                vcproj.name
+            )
+        })?;
 
         // let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
         // for (flag, files) in flags_n_files {
@@ -122,7 +124,17 @@ fn main() -> anyhow::Result<()> {
                         vcproj.name
                     )
                 })?;
-                let flags = lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
+                let _flags = lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
+                // println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, flags);
+            }
+            ConfigurationType::_1 | ConfigurationType::_2 => {
+                let linker_tool = build_cfg.linker_tool.as_ref().with_context(|| {
+                    format!(
+                        "Failed to find linker tool for library configuration: {}",
+                        vcproj.name
+                    )
+                })?;
+                let flags = linker_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
                 println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, flags);
             }
             _ => (),
