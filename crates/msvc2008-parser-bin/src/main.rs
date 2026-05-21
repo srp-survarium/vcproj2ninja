@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
         })?;
 
         let _flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
-        // for (flag, files) in flags_n_files {
+        // for (flag, files) in _flags_n_files {
         //     println!("[{}]: {}", vcproj.name, flag);
         //      println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
         //      for file in files {
@@ -125,7 +125,7 @@ fn main() -> anyhow::Result<()> {
                     )
                 })?;
                 let _flags = lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
-                // println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, flags);
+                println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, _flags);
             }
             ConfigurationType::_1 | ConfigurationType::_2 => {
                 let linker_tool = build_cfg.linker_tool.as_ref().with_context(|| {
@@ -134,8 +134,8 @@ fn main() -> anyhow::Result<()> {
                         vcproj.name
                     )
                 })?;
-                let flags = linker_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
-                println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, flags);
+                let _flags = linker_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
+                // println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, _flags);
             }
             _ => (),
         }

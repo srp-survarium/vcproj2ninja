@@ -4,6 +4,7 @@ use super::macros::*;
 use super::utils::pathdiff;
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -141,12 +142,15 @@ impl LibTool {
             Self::parse_file(&mut result, file, configuration_platform);
         }
 
+        // It is possible for the same file to repeat multiple times in `Files` tag.
+        // This can be seen in `render_engine_pc_dx11.vcproj` for `effect_editor_shader_complexity.cpp`.
+        let mut conflicts = HashSet::new();
+        result.retain(|file| conflicts.insert(*file));
+
         result
     }
 
-    fn check_no_conflicts<'a>(_files: impl Iterator<Item = &'a OsStr>) {
-        // use std::collections::HashSet;
-
+    fn check_no_conflicts<'a>(files: impl Iterator<Item = &'a OsStr>) {
         // @TODO:
         // In our code `render_engine_pc_dx11` has conflicts.
         // Specifically, `effect_editor_selection` is repeated twice.
@@ -157,15 +161,16 @@ impl LibTool {
         // Need to check that file for cl flags.
         // Need to write parser-comparer to find all mismatches.
 
-        // let mut conflicts = HashSet::new();
-        // for file in files {
-        //     if !conflicts.insert(file) {
-        //         panic!(
-        //             "Failed parsing linker flags. The file '{}' has a conflict with the same name",
-        //             file.to_string_lossy()
-        //         )
-        //     }
-        // }
+        use std::collections::HashSet;
+        let mut conflicts = HashSet::new();
+        for file in files {
+            if !conflicts.insert(file) {
+                panic!(
+                    "Failed parsing linker flags. The file '{}' has a conflict with the same name",
+                    file.to_string_lossy()
+                )
+            }
+        }
     }
 
     fn parse_filter<'a>(
