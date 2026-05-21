@@ -100,14 +100,14 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let _cl = build_cfg.compiler_tool.as_ref().with_context(|| {
+        let cl = build_cfg.compiler_tool.as_ref().with_context(|| {
             format!(
                 "Only xbox configurations do not have a compiler enabled: {}",
                 vcproj.name
             )
         })?;
 
-        // let flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
+        let _flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
         // for (flag, files) in flags_n_files {
         //     println!("[{}]: {}", vcproj.name, flag);
         //      println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
