@@ -1,12 +1,12 @@
 use vs2008_parser_proc::{ParseXml, flag_enum};
 
+use super::flags::Flags;
 use super::macros::*;
 use super::utils::pathdiff;
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, ParseXml)]
@@ -34,7 +34,7 @@ impl LibTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> String {
+    ) -> Flags {
         let Self {
             additional_options,
             output_file,
@@ -47,11 +47,11 @@ impl LibTool {
             .as_deref()
             .unwrap_or("$(OutDir)\\$(ProjectName).lib");
 
-        let mut result = String::new();
+        let mut rsp_flags: Vec<String> = vec![];
 
-        let out_file = env.expand(output_file);
-        let out_file = out_file.trim().trim_matches('"');
-        write!(result, " /OUT:\"{out_file}\"").unwrap();
+        let output_file = env.expand(output_file);
+        let output_file = output_file.trim().trim_matches('"');
+        rsp_flags.push(format!("/OUT:\"{output_file}\""));
 
         for lib_path in additional_library_directories
             .iter()
@@ -60,8 +60,7 @@ impl LibTool {
         {
             let lib_path = env.expand(lib_path);
             let lib_path = lib_path.trim().trim_matches('"');
-
-            write!(result, " /LIBPATH:\"{lib_path}\"").unwrap();
+            rsp_flags.push(format!("/LIBPATH:\"{lib_path}\""));
         }
 
         for lib_path in ignore_default_library_names
@@ -71,27 +70,27 @@ impl LibTool {
         {
             let lib_path = env.expand(lib_path);
             let lib_path = lib_path.trim().trim_matches('"');
-
-            write!(result, " /NODEFAULTLIB:\"{lib_path}\"").unwrap();
+            rsp_flags.push(format!("/NODEFAULTLIB:\"{lib_path}\""));
         }
 
         if matches!(cfg.whole_program_optimization, Some(true)) {
-            result.push(' ');
-            result.push_str("/LTCG");
+            rsp_flags.push("/LTCG".to_string());
         }
 
         if let Some(additional_options) = additional_options
             && !additional_options.is_empty()
         {
-            result.push(' ');
-            result.push_str(additional_options);
+            rsp_flags.push(additional_options.clone());
         }
 
         let files = Self::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        result.push_str(&files.join("\n"));
-
-        result
+        Flags {
+            output_file: output_file.to_string(),
+            flags: "@$(RspFile) /NOLOGO".to_string(),
+            rsp_flags: rsp_flags.join("\n"),
+            files,
+        }
     }
 
     pub fn file_flags(

@@ -1,4 +1,5 @@
 mod env;
+mod flags;
 mod macros;
 mod tool_cl;
 mod tool_lib;

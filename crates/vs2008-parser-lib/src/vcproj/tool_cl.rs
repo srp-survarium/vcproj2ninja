@@ -1,5 +1,6 @@
 use vs2008_parser_proc::{ParseXml, flag_enum};
 
+use super::flags::{Flags, append_flags};
 use super::macros::*;
 use super::{CharacterSet, ConfigurationType};
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
@@ -300,21 +301,13 @@ flag_enum! {
     }
 }
 
-macro_rules! flags {
-    ($($opt:expr),* $(,)?) => {{
-        let mut v = vec![$($opt.as_ref().map(|v| v.as_str()).unwrap_or(""),)*];
-        v.retain(|s| !s.is_empty());
-        v.join(" ")
-    }};
-}
-
 impl CompilerTool {
     pub fn to_flags(
         &self,
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> Vec<(String, Vec<String>)> {
+    ) -> Vec<Flags> {
         let mut result = vec![];
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
@@ -340,14 +333,16 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
-            let flags = tool.to_flags_impl(cfg, env);
-            result.push((flags, files));
+            let mut flags = tool.to_flags_impl(cfg, env);
+            flags.files = files;
+
+            result.push(flags);
         }
 
         result
     }
 
-    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> String {
+    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> Flags {
         let Self {
             additional_options,
             optimization,
@@ -379,7 +374,7 @@ impl CompilerTool {
             generate_preprocessed_file,
             show_includes,
             struct_member_alignment,
-            suppress_startup_banner,
+            suppress_startup_banner: _,
             detect_64_bit_portability_problems,
             //
             precompiled_header_file,
@@ -493,28 +488,30 @@ impl CompilerTool {
         //
         //
 
-        let mut result = flags![
-            optimization,
-            inline_function_expansion,
-            enable_intrinsic_functions,
-            favor_size_or_speed,
-            omit_frame_pointers,
-            enable_fiber_safe_optimizations,
-            whole_program_optimization,
-        ];
+        let mut rsp_flags: Vec<String> = vec![];
+
+        append_flags!(
+            rsp_flags,
+            [
+                optimization,
+                inline_function_expansion,
+                enable_intrinsic_functions,
+                favor_size_or_speed,
+                omit_frame_pointers,
+                enable_fiber_safe_optimizations,
+                whole_program_optimization,
+            ]
+        );
 
         for include_directory in additional_include_directories
             .iter()
             .filter(|s| !s.is_empty())
         {
-            result.push(' ');
-            result.push_str("/I ");
+            let expanded = env.expand(include_directory.trim());
             if !include_directory.starts_with('"') {
-                result.push('"');
-            }
-            result.push_str(&env.expand(include_directory.trim()));
-            if !include_directory.ends_with('"') {
-                result.push('"');
+                rsp_flags.push(format!("/I \"{expanded}\""));
+            } else {
+                rsp_flags.push(format!("/I {expanded}"));
             }
         }
 
@@ -538,47 +535,35 @@ impl CompilerTool {
         };
 
         for preprocessor_definition in preprocessor_definitions.iter().filter(|s| !s.is_empty()) {
-            result.push(' ');
-            result.push_str("/D ");
-            result.push('"');
-            result.push_str(preprocessor_definition);
-            result.push('"');
+            rsp_flags.push(format!("/D \"{preprocessor_definition}\""));
         }
 
-        result.push(' ');
-
-        result.push_str(&flags![
-            string_pooling,
-            generate_program_database,
-            exception_handling,
-            runtime_library,
-            buffer_security_check,
-            enable_enhanced_instruction_set,
-            enable_function_level_linking,
-            floating_point_model,
-            runtime_type_info,
-            use_precompiled_header_flag,
-        ]);
+        append_flags!(
+            rsp_flags,
+            [
+                string_pooling,
+                generate_program_database,
+                exception_handling,
+                runtime_library,
+                buffer_security_check,
+                enable_enhanced_instruction_set,
+                enable_function_level_linking,
+                floating_point_model,
+                runtime_type_info,
+                use_precompiled_header_flag,
+            ]
+        );
 
         // /Fp"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vostok_fs-static-gold.pch"
         if let Some(precompiled_header_file) = precompiled_header_file
             && !precompiled_header_file.is_empty()
         {
-            result.push(' ');
-            result.push_str("/Fp");
-            result.push('"');
-            result.push_str(&env.expand(precompiled_header_file));
-            result.push('"');
+            rsp_flags.push(format!("/Fp\"{}\"", env.expand(precompiled_header_file)));
         }
 
         // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
-        if !object_file.is_empty() {
+        let output_file = if !object_file.is_empty() {
             let object_file = env.expand(object_file);
-
-            result.push(' ');
-            result.push_str("/Fo");
-            result.push('"');
-            result.push_str(&object_file);
 
             // TODO: Incorrect because of two reasons.
             // msbuild doesn't actually match on extension. It does it somehow differently:
@@ -587,64 +572,64 @@ impl CompilerTool {
             // Here extension would be .4, which is wrong :)
             //
             // Also / as an end counts, not just \.
+            let mut fo_path = object_file.clone();
             if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
-                result.push('\\');
+                fo_path.push('\\');
             }
-            result.push('"');
-        }
+            rsp_flags.push(format!("/Fo\"{fo_path}\""));
+            object_file
+        } else {
+            String::new() // TODO
+        };
 
         // /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vc90.pdb"
         if !program_data_base_file_name.is_empty() {
-            result.push(' ');
-            result.push_str("/Fd");
-            result.push('"');
-            result.push_str(&env.expand(program_data_base_file_name));
-            result.push('"');
+            rsp_flags.push(format!(
+                "/Fd\"{}\"",
+                env.expand(program_data_base_file_name)
+            ));
         }
-        result.push(' ');
 
-        result.push_str(&flags![
-            warning_level,
-            compile_only,
-            debug_information_format,
-            minimal_rebuild,
-            basic_runtime_checks,
-            smaller_type_check,
-            browse_information,
-            calling_convention,
-            compile_as,
-            floating_point_exceptions,
-            force_conformance_in_for_loop_scope,
-            generate_preprocessed_file,
-            show_includes,
-            struct_member_alignment,
-            detect_64_bit_portability_problems,
-        ]);
+        append_flags!(
+            rsp_flags,
+            [
+                warning_level,
+                compile_only,
+                debug_information_format,
+                minimal_rebuild,
+                basic_runtime_checks,
+                smaller_type_check,
+                browse_information,
+                calling_convention,
+                compile_as,
+                floating_point_exceptions,
+                force_conformance_in_for_loop_scope,
+                generate_preprocessed_file,
+                show_includes,
+                struct_member_alignment,
+                detect_64_bit_portability_problems,
+            ]
+        );
 
         for disable_specific_warning in disable_specific_warnings
             .iter()
             .flatten()
             .filter(|s| !s.is_empty())
         {
-            result.push(' ');
-            result.push_str("/wd");
-            result.push_str(disable_specific_warning);
+            rsp_flags.push(format!("/wd{disable_specific_warning}"));
         }
 
         if let Some(additional_options) = additional_options
             && !additional_options.is_empty()
         {
-            result.push(' ');
-            result.push(' ');
-            result.push_str(additional_options);
+            rsp_flags.push(additional_options.clone());
         }
-
-        for flag in suppress_startup_banner.iter() {
-            result.push(' ');
-            result.push_str(flag.as_str());
+        Flags {
+            output_file: output_file,
+            flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
+            rsp_flags: rsp_flags.join(" "),
+            files: vec![],
         }
-
-        result.trim_start().to_string()
     }
 
     fn parse_files(

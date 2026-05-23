@@ -1,5 +1,6 @@
 use vs2008_parser_proc::{flag_enum, ParseXml};
 
+use super::flags::{append_flags, Flags};
 use super::macros::*;
 use super::utils;
 use super::ConfigurationType;
@@ -166,18 +167,6 @@ flag_enum! {
     }
 }
 
-macro_rules! append_flags {
-    ($vec:ident, [$($opt:expr),* $(,)?]) => {{
-        $(
-            if let Some(flag) = $opt.as_ref() {
-                let flag_str = flag.as_str();
-                if !flag_str.is_empty() {
-                    $vec.push(String::from(flag_str));
-                }
-            }
-        )*
-    }};
-}
 macro_rules! unimplemented_flag {
     ($flag:expr) => {
         if $flag.is_some() {
@@ -207,7 +196,7 @@ impl LinkerTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> String {
+    ) -> Flags {
         let Self {
             additional_options,
             additional_dependencies,
@@ -257,7 +246,7 @@ impl LinkerTool {
         unimplemented_flag!(false: map_exports);
         unimplemented_flag!(false: generate_map_file);
 
-        let mut flags = vec![];
+        let mut rsp_flags = vec![];
 
         let output_file = output_file
             .as_deref()
@@ -268,26 +257,26 @@ impl LinkerTool {
             });
         let output_file = env.expand(output_file);
         let output_file = utils::clean(&output_file);
-        flags.push(format!("/OUT:\"{output_file}\""));
+        rsp_flags.push(format!("/OUT:\"{output_file}\""));
 
-        append_flags!(flags, [link_incremental]);
+        append_flags!(rsp_flags, [link_incremental]);
 
         for lib_path in additional_library_directories.iter().flatten() {
             let lib_path = env.expand(lib_path);
             let lib_path = utils::clean(&lib_path);
 
             if !lib_path.is_empty() {
-                flags.push(format!("/LIBPATH:\"{lib_path}\""));
+                rsp_flags.push(format!("/LIBPATH:\"{lib_path}\""));
             }
         }
 
         if matches!(cfg.configuration_type, ConfigurationType::_2) {
-            flags.push("/DLL".to_string());
+            rsp_flags.push("/DLL".to_string());
         }
 
         let generate_manifest = generate_manifest.unwrap_or(true);
         if generate_manifest {
-            flags.push("/MANIFEST".to_string());
+            rsp_flags.push("/MANIFEST".to_string());
 
             let target_file_name = Path::new(output_file)
                 .file_name()
@@ -300,29 +289,29 @@ impl LinkerTool {
             ));
             // /MANIFESTFILE:"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/nvtt\vostok_nvtt.dll.intermediate.manifest"
             let manifest_file = utils::clean(&manifest_file);
-            flags.push(format!("/MANIFESTFILE:\"{manifest_file}\""));
+            rsp_flags.push(format!("/MANIFESTFILE:\"{manifest_file}\""));
 
             // @TODO: VS2008 SP1 default UAC fragment. Extend with struct fields when added.
             // /MANIFESTUAC:"level='asInvoker' uiAccess='false'"
-            flags.push("/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\"".to_string());
+            rsp_flags.push("/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\"".to_string());
         }
 
         for lib_name in ignore_default_library_names.iter().flatten() {
             let lib_name = utils::clean(lib_name);
 
             if !lib_name.is_empty() {
-                flags.push(format!("/NODEFAULTLIB:\"{lib_name}\""));
+                rsp_flags.push(format!("/NODEFAULTLIB:\"{lib_name}\""));
             }
         }
 
         if let Some(module_definition_file) = module_definition_file {
             let module_definition_file = utils::clean(module_definition_file);
 
-            flags.push(format!("/DEF:\"{module_definition_file}\""));
+            rsp_flags.push(format!("/DEF:\"{module_definition_file}\""));
         }
 
         // @TODO: Does `generate_debug_information` affect PDB?
-        append_flags!(flags, [generate_debug_information]);
+        append_flags!(rsp_flags, [generate_debug_information]);
         {
             let program_database_file = program_database_file.clone().unwrap_or_else(|| {
                 Path::new(output_file)
@@ -336,11 +325,11 @@ impl LinkerTool {
             let program_database_file = env.expand(&program_database_file);
             let program_database_file = utils::clean(&program_database_file);
 
-            flags.push(format!("/PDB:\"{program_database_file}\""));
+            rsp_flags.push(format!("/PDB:\"{program_database_file}\""));
         }
 
         append_flags!(
-            flags,
+            rsp_flags,
             [
                 sub_system,
                 large_address_aware,
@@ -350,17 +339,17 @@ impl LinkerTool {
         );
 
         if matches!(cfg.whole_program_optimization, Some(true)) {
-            flags.push("/LTCG".to_string());
+            rsp_flags.push("/LTCG".to_string());
         }
 
         if let Some(base_address) = base_address {
             let base_address = utils::clean(base_address);
 
-            flags.push(format!("/BASE:\"{base_address}\""));
+            rsp_flags.push(format!("/BASE:\"{base_address}\""));
         }
 
         append_flags!(
-            flags,
+            rsp_flags,
             [
                 randomized_base_address,
                 data_execution_prevention,
@@ -375,28 +364,55 @@ impl LinkerTool {
             };
             let import_library = env.expand(import_library);
             let import_library = utils::clean(&import_library);
-            flags.push(format!("/IMPLIB:\"{import_library}\""));
+            rsp_flags.push(format!("/IMPLIB:\"{import_library}\""));
         }
 
-        append_flags!(flags, [target_machine]);
+        append_flags!(rsp_flags, [target_machine]);
 
         for dll in delay_load_dlls.iter().flatten() {
             let dll = utils::clean(dll);
 
             if !dll.is_empty() {
-                flags.push(format!("/delayload:{dll}"));
+                rsp_flags.push(format!("/delayload:{dll}"));
             }
         }
 
-        append_flags!(flags, [additional_options, additional_dependencies]);
+        append_flags!(rsp_flags, [additional_options, additional_dependencies]);
 
-        flags.extend(LibTool::file_flags(
-            &vcproject.files,
-            &cfg.name,
-            vcproj_rpath,
-            env,
-        ));
+        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        flags.join("\n ")
+        Flags {
+            output_file: output_file.to_string(),
+            flags: "@$(RspFile) /NOLOGO /ERRORREPORT:PROMPT".to_string(),
+            rsp_flags: rsp_flags.join(" "),
+            files,
+        }
+    }
+
+    pub fn to_flags_for_lib(
+        vcproj_rpath: &str,
+        cfg: &Configuration,
+        vcproject: &VCProject,
+        env: MsBuildEnvironment,
+    ) -> Flags {
+        let output_file = match cfg.configuration_type {
+            ConfigurationType::_1 => "$(OutDir)\\$(ProjectName).exe",
+            ConfigurationType::_2 => "$(OutDir)\\$(ProjectName).dll",
+            _ => unimplemented!(),
+        };
+        let output_file = env.expand(output_file);
+        let output_file = utils::clean(&output_file);
+
+        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
+
+        let mut rsp_flags = vec![];
+        rsp_flags.push(format!("/OUT:\"{output_file}\""));
+
+        Flags {
+            output_file: output_file.to_string(),
+            flags: "/LIB @$(RspFile) /NOLOGO".to_string(),
+            rsp_flags: rsp_flags.join(" "),
+            files,
+        }
     }
 }
