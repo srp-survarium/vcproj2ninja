@@ -340,7 +340,7 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
-            // Compute output directory for .obj files; ninja rspfile rule uses this as $obj_dir.
+            // Compute output directory for .obj files; used by the ninja writer to declare build outputs.
             let obj_pattern = tool.object_file.as_deref().unwrap_or("$(IntDir)");
             let mut output_file = env.expand(obj_pattern);
             if Path::new(&output_file).extension().is_none() && !output_file.ends_with('\\') {

@@ -3,9 +3,7 @@ pub struct Flags {
     /// LIB/LINK: expanded output file path, e.g. `E:\...\libraries\mylib.lib`
     pub output_file: String,
 
-    /// Command-line flags.
-    /// CL:       without /Fo (emitted by the ninja rspfile rule via $obj_dir).
-    /// LIB/LINK: without /OUT: (emitted by the ninja rspfile rule via $out).
+    /// Full command-line flags, including /Fo for CL and /OUT: for LIB/LINK.
     pub flags: String,
 
     /// Input files.
