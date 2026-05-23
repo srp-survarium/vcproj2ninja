@@ -116,7 +116,7 @@ fn write_cl(
     for src in &flags.files {
         let obj = {
             let out_file = &flags.output_file;
-            if Path::new(out_file).extension().is_some() {
+            if Path::new(out_file).extension().is_some_and(|e| e.eq_ignore_ascii_case("obj")) {
                 out_file.clone()
             } else {
                 let sep = if out_file.ends_with(['\\', '/']) { "" } else { "\\" };
