@@ -1,9 +1,9 @@
-use vs2008_parser_proc::{flag_enum, ParseXml};
+use vs2008_parser_proc::{ParseXml, flag_enum};
 
-use super::flags::{append_flags, Flags};
+use super::ConfigurationType;
+use super::flags::{Flags, append_flags};
 use super::macros::*;
 use super::utils;
-use super::ConfigurationType;
 use super::{Configuration, LibTool, MsBuildEnvironment, VCProject};
 
 use std::path::Path;
@@ -388,5 +388,4 @@ impl LinkerTool {
             files,
         }
     }
-
 }

@@ -90,7 +90,6 @@ impl LibTool {
             flags: "@$(RspFile) /NOLOGO".to_string(),
             rsp_flags: rsp_flags.join(" "),
             files,
-            obj_files: vec![],
         }
     }
 
@@ -113,38 +112,49 @@ impl LibTool {
         let int_dir = PathBuf::from(env.expand(env.int_dir));
 
         let source_files = Self::parse_files(files, configuration_platform);
-        Self::check_no_conflicts(source_files.iter().map(|(p, _)| Path::new(p).file_name().unwrap()));
+        Self::check_no_conflicts(
+            source_files
+                .iter()
+                .map(|(p, _)| Path::new(p).file_name().unwrap()),
+        );
 
         let mut int_rpath = pathdiff(&vcproj_dir, &int_dir);
         let base_len = int_rpath.as_os_str().as_encoded_bytes().len();
 
         let mut result = vec![];
         for (source_path, obj_override) in source_files {
-            if let Some(raw) = obj_override {
-                let expanded = env.expand(raw);
-                let cleaned = expanded.trim().trim_matches('"').to_string();
-                let obj_path = if Path::new(&cleaned).extension().is_some() {
-                    cleaned
-                } else {
-                    let file_name = Path::new(source_path).file_stem().unwrap();
-                    let mut dir = PathBuf::from(cleaned);
-                    dir.push(file_name);
-                    dir.set_extension("obj");
-                    dir.to_str().unwrap().to_string()
-                };
-                result.push(obj_path);
-            } else {
-                let file_name = Path::new(source_path).file_name().unwrap();
-                int_rpath.as_mut_os_string().truncate(base_len);
-                int_rpath.push(file_name);
-                int_rpath.set_extension("obj");
-                result.push(int_rpath.to_str().unwrap().to_string());
-            }
+            let mut env = env;
+            env.input_name = source_path;
+
+            let obj_override = obj_override.map(|obj_override| {
+                let obj_override = env.expand(obj_override);
+                println!("{obj_override}");
+                let obj_override = obj_override.trim().trim_matches('"').to_string();
+                assert_eq!(
+                    Path::new(&obj_override).extension(),
+                    Some(OsStr::new("obj"))
+                );
+
+                obj_override
+            });
+
+            let source_path = match &obj_override {
+                None => source_path,
+                Some(obj_override) => obj_override.as_str(),
+            };
+            let file_name = Path::new(source_path).file_stem().unwrap();
+            int_rpath.as_mut_os_string().truncate(base_len);
+            int_rpath.push(file_name);
+            int_rpath.set_extension("obj");
+            result.push(int_rpath.to_str().unwrap().to_string());
         }
         result
     }
 
-    pub fn parse_files<'a>(files: &'a Files, configuration_platform: &str) -> Vec<(&'a str, Option<&'a str>)> {
+    pub fn parse_files<'a>(
+        files: &'a Files,
+        configuration_platform: &str,
+    ) -> Vec<(&'a str, Option<&'a str>)> {
         let mut result = vec![];
 
         for filter in &files.filters {
@@ -200,7 +210,11 @@ impl LibTool {
         }
     }
 
-    fn parse_file<'a>(result: &mut Vec<(&'a str, Option<&'a str>)>, file: &'a File, configuration_platform: &str) {
+    fn parse_file<'a>(
+        result: &mut Vec<(&'a str, Option<&'a str>)>,
+        file: &'a File,
+        configuration_platform: &str,
+    ) {
         for file in &file.files {
             Self::parse_file(result, file, configuration_platform);
         }
@@ -224,7 +238,9 @@ impl LibTool {
             return;
         }
 
-        let obj_override = config.and_then(|c| c.tool.as_ref()).and_then(|t| t.object_file.as_deref());
+        let obj_override = config
+            .and_then(|c| c.tool.as_ref())
+            .and_then(|t| t.object_file.as_deref());
 
         result.push((&file.relative_path, obj_override));
     }

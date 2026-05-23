@@ -52,7 +52,10 @@ impl NinjaFile {
             }
         }
 
-        NinjaOutput { ninja_text: out, rsp_files }
+        NinjaOutput {
+            ninja_text: out,
+            rsp_files,
+        }
     }
 }
 
@@ -88,7 +91,10 @@ fn write_rules(out: &mut impl FmtWrite) -> std::fmt::Result {
     writeln!(out, "  command = cd /d \"$proj_dir\" && cl @$rsp")?;
     writeln!(out)?;
     writeln!(out, "rule lib_link")?;
-    writeln!(out, "  command = cd /d \"$proj_dir\" && lib @$rsp && link /LIB @$rsp")?;
+    writeln!(
+        out,
+        "  command = cd /d \"$proj_dir\" && lib @$rsp && link /LIB @$rsp"
+    )?;
     writeln!(out)?;
     writeln!(out, "rule link")?;
     writeln!(out, "  command = cd /d \"$proj_dir\" && link @$rsp")?;
@@ -96,27 +102,29 @@ fn write_rules(out: &mut impl FmtWrite) -> std::fmt::Result {
     Ok(())
 }
 
-fn write_cl(out: &mut impl FmtWrite, flags: &Flags, rsp_path: &Path, proj_dir: &str) -> std::fmt::Result {
+fn write_cl(
+    out: &mut impl FmtWrite,
+    flags: &Flags,
+    rsp_path: &Path,
+    proj_dir: &str,
+) -> std::fmt::Result {
     if flags.files.is_empty() {
         return Ok(());
     }
 
-    // output_file is a directory when it has no extension; a full .obj path when it does.
-    let is_file_override = Path::new(&flags.output_file).extension().is_some();
-
     writeln!(out, "build $")?;
     for src in &flags.files {
-        let obj = if is_file_override {
-            ninja_path("", &flags.output_file)
-        } else {
-            let stem = Path::new(src)
-                .file_stem()
-                .expect("source file must have a stem")
-                .to_str()
-                .expect("stem is valid UTF-8");
-            ninja_path(&flags.output_file, &format!("{stem}.obj"))
+        let obj = {
+            let out_file = &flags.output_file;
+            if Path::new(out_file).extension().is_some() {
+                out_file.clone()
+            } else {
+                let sep = if out_file.ends_with(['\\', '/']) { "" } else { "\\" };
+                let stem = Path::new(src).file_stem().expect("source has stem").to_str().expect("valid UTF-8");
+                format!("{out_file}{sep}{stem}.obj")
+            }
         };
-        writeln!(out, "    {obj} $")?;
+        writeln!(out, "    {} $", ninja_path("", &obj))?;
     }
     write!(out, "    : cl")?;
     for src in &flags.files {
@@ -127,7 +135,13 @@ fn write_cl(out: &mut impl FmtWrite, flags: &Flags, rsp_path: &Path, proj_dir: &
     writeln!(out)
 }
 
-fn write_final(out: &mut impl FmtWrite, rule: &str, flags: &Flags, rsp_path: &Path, proj_dir: &str) -> std::fmt::Result {
+fn write_final(
+    out: &mut impl FmtWrite,
+    rule: &str,
+    flags: &Flags,
+    rsp_path: &Path,
+    proj_dir: &str,
+) -> std::fmt::Result {
     writeln!(out, "build $")?;
     writeln!(out, "    {} $", ninja_path("", &flags.output_file))?;
     if flags.files.is_empty() {
