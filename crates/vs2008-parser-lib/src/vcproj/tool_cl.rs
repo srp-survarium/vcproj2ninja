@@ -587,7 +587,13 @@ impl CompilerTool {
             result.push('"');
             result.push_str(&object_file);
 
-            // TODO: msbuild doesn't actually match on extension the same way.
+            // TODO: Incorrect because of two reasons.
+            // msbuild doesn't actually match on extension. It does it somehow differently:
+            // Fo"E:\Projects\vostok\sources\/../binaries/Win32/intermediates/Release (static)/lua.5.1.4\"
+            //
+            // Here extension would be .4, which is wrong :)
+            //
+            // Also / as an end counts, not just \.
             if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
                 result.push('\\');
             }
