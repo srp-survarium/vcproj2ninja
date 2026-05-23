@@ -389,30 +389,4 @@ impl LinkerTool {
         }
     }
 
-    pub fn to_flags_for_lib(
-        vcproj_rpath: &str,
-        cfg: &Configuration,
-        vcproject: &VCProject,
-        env: MsBuildEnvironment,
-    ) -> Flags {
-        let output_file = match cfg.configuration_type {
-            ConfigurationType::_1 => "$(OutDir)\\$(ProjectName).exe",
-            ConfigurationType::_2 => "$(OutDir)\\$(ProjectName).dll",
-            _ => unimplemented!(),
-        };
-        let output_file = env.expand(output_file);
-        let output_file = utils::clean(&output_file);
-
-        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
-
-        let mut rsp_flags = vec![];
-        rsp_flags.push(format!("/OUT:\"{output_file}\""));
-
-        Flags {
-            output_file: output_file.to_string(),
-            flags: "/LIB @$(RspFile) /NOLOGO".to_string(),
-            rsp_flags: rsp_flags.join(" "),
-            files,
-        }
-    }
 }

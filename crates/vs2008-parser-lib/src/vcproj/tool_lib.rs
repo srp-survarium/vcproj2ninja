@@ -88,7 +88,7 @@ impl LibTool {
         Flags {
             output_file: output_file.to_string(),
             flags: "@$(RspFile) /NOLOGO".to_string(),
-            rsp_flags: rsp_flags.join("\n"),
+            rsp_flags: rsp_flags.join(" "),
             files,
         }
     }
@@ -125,7 +125,7 @@ impl LibTool {
 
             int_rpath.push(source_file);
             int_rpath.set_extension("obj");
-            result.push(format!("\"{}\"", int_rpath.to_str().unwrap()));
+            result.push(int_rpath.to_str().unwrap().to_string());
         }
         result
     }

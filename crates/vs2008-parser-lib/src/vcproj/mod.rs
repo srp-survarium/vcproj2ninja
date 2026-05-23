@@ -11,6 +11,7 @@ use vs2008_parser_proc::{flag_enum, ParseXml};
 use macros::{optparse, parse, parse_attrs};
 
 pub use env::MsBuildEnvironment;
+pub use flags::Flags;
 pub use tool_cl::CompilerTool;
 pub use tool_lib::LibTool;
 pub use tool_linker::LinkerTool;

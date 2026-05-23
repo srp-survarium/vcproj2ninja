@@ -5,7 +5,7 @@ use super::macros::*;
 use super::{CharacterSet, ConfigurationType};
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -317,8 +317,14 @@ impl CompilerTool {
             .into_iter()
             .collect::<Vec<_>>();
 
-        // "Yc" > "Yu"
-        tool_n_files.sort_by_key(|tool| std::cmp::Reverse(tool.0.use_precompiled_header));
+        // PCH creation (/Yc) must be compiled before everything else
+        tool_n_files.sort_by_key(|(tool, _)| {
+            if matches!(tool.use_precompiled_header, Some(UsePrecompiledHeader::_1)) {
+                0usize
+            } else {
+                1usize
+            }
+        });
 
         for (tool, files) in tool_n_files {
             let mut env = env;
@@ -326,7 +332,7 @@ impl CompilerTool {
                 let input_name = Path::new(&files[0])
                     .file_stem()
                     .map(|x| x.to_str().expect("Path was constructed from String"))
-                    .unwrap_or(files[0].as_str());
+                    .unwrap_or(files[0]);
 
                 env.input_name = input_name;
             } else {
@@ -334,7 +340,7 @@ impl CompilerTool {
             }
 
             let mut flags = tool.to_flags_impl(cfg, env);
-            flags.files = files;
+            flags.files = files.iter().map(|file| file.to_string()).collect();
 
             result.push(flags);
         }
@@ -625,17 +631,17 @@ impl CompilerTool {
             rsp_flags.push(additional_options.clone());
         }
         Flags {
-            output_file: output_file,
+            output_file,
             flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
             rsp_flags: rsp_flags.join(" "),
             files: vec![],
         }
     }
 
-    fn parse_files(
-        files: &Files,
+    fn parse_files<'a>(
+        files: &'a Files,
         configuration_platform: &str,
-    ) -> HashMap<CompilerTool, Vec<String>> {
+    ) -> HashMap<CompilerTool, Vec<&'a str>> {
         let mut result = HashMap::new();
 
         for filter in &files.filters {
@@ -645,13 +651,19 @@ impl CompilerTool {
         for file in &files.files {
             Self::parse_file(&mut result, file, configuration_platform);
         }
+        for files in result.values_mut() {
+            // It is possible for the same file to repeat multiple times in `Files` tag.
+            // This can be seen in `render_engine_pc_dx11.vcproj` for `effect_editor_shader_complexity.cpp`.
+            let mut conflicts = HashSet::new();
+            files.retain(|file| conflicts.insert(*file));
+        }
 
         result
     }
 
-    fn parse_filter(
-        result: &mut HashMap<CompilerTool, Vec<String>>,
-        filter: &Filter,
+    fn parse_filter<'a>(
+        result: &mut HashMap<CompilerTool, Vec<&'a str>>,
+        filter: &'a Filter,
         configuration_platform: &str,
     ) {
         for filter in &filter.filters {
@@ -663,9 +675,9 @@ impl CompilerTool {
         }
     }
 
-    fn parse_file(
-        result: &mut HashMap<CompilerTool, Vec<String>>,
-        file: &File,
+    fn parse_file<'a>(
+        result: &mut HashMap<CompilerTool, Vec<&'a str>>,
+        file: &'a File,
         configuration_platform: &str,
     ) {
         for file in &file.files {
@@ -715,6 +727,6 @@ impl CompilerTool {
         result
             .entry(cl_tool)
             .or_default()
-            .push(file.relative_path.clone());
+            .push(file.relative_path.as_str());
     }
 }
