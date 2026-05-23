@@ -49,7 +49,8 @@ impl LibTool {
         let out_file = env.expand(output_file);
         let out_file = out_file.trim().trim_matches('"');
 
-        let mut flags = vec![format!("/OUT:\"{out_file}\"")];
+        let mut flags = vec![];
+        flags.push(format!("/OUT:\"{out_file}\""));
 
         for lib_path in additional_library_directories
             .iter()
