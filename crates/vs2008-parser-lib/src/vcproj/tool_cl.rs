@@ -2,7 +2,7 @@ use vs2008_parser_proc::{ParseXml, flag_enum};
 
 use super::macros::*;
 use super::{CharacterSet, ConfigurationType};
-use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
+use super::{Configuration, File, Files, Filter, Flags, MsBuildEnvironment, VCProject};
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -314,7 +314,7 @@ impl CompilerTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> Vec<(String, Vec<String>)> {
+    ) -> Vec<Flags> {
         let mut result = vec![];
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
@@ -340,8 +340,15 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
+            // Compute output directory for .obj files; ninja rspfile rule uses this as $obj_dir.
+            let obj_pattern = tool.object_file.as_deref().unwrap_or("$(IntDir)");
+            let mut output_file = env.expand(obj_pattern);
+            if Path::new(&output_file).extension().is_none() && !output_file.ends_with('\\') {
+                output_file.push('\\');
+            }
+
             let flags = tool.to_flags_impl(cfg, env);
-            result.push((flags, files));
+            result.push(Flags { output_file, flags, files });
         }
 
         result
@@ -383,7 +390,7 @@ impl CompilerTool {
             detect_64_bit_portability_problems,
             //
             precompiled_header_file,
-            object_file,
+            object_file: _,
             program_data_base_file_name,
             //
             precompiled_header_through,
@@ -473,8 +480,6 @@ impl CompilerTool {
             }
             _ => None,
         };
-
-        let object_file = object_file.as_deref().unwrap_or("$(IntDir)");
 
         let precompiled_header_file = match (precompiled_header_file, use_precompiled_header) {
             (None, Some(use_precompiled_header))
@@ -568,28 +573,6 @@ impl CompilerTool {
             result.push_str("/Fp");
             result.push('"');
             result.push_str(&env.expand(precompiled_header_file));
-            result.push('"');
-        }
-
-        // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
-        if !object_file.is_empty() {
-            let object_file = env.expand(object_file);
-
-            result.push(' ');
-            result.push_str("/Fo");
-            result.push('"');
-            result.push_str(&object_file);
-
-            // TODO: Incorrect because of two reasons.
-            // msbuild doesn't actually match on extension. It does it somehow differently:
-            // Fo"E:\Projects\vostok\sources\/../binaries/Win32/intermediates/Release (static)/lua.5.1.4\"
-            //
-            // Here extension would be .4, which is wrong :)
-            //
-            // Also / as an end counts, not just \.
-            if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
-                result.push('\\');
-            }
             result.push('"');
         }
 

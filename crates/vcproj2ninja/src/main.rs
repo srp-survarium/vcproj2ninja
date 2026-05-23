@@ -105,14 +105,7 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
 
-        let _flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
-        // for (flag, files) in _flags_n_files {
-        //     println!("[{}]: {}", vcproj.name, flag);
-        //      println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
-        //      for file in files {
-        //          println!("  {file}");
-        //      }
-        // }
+        let _cl_flags = cl.to_flags(build_cfg, &vcproj, env);
 
         match build_cfg.configuration_type {
             ConfigurationType::_4 => {
@@ -123,17 +116,15 @@ fn main() -> anyhow::Result<()> {
                     )
                 })?;
                 let _flags = lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
-                println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, _flags);
             }
             ConfigurationType::_1 | ConfigurationType::_2 => {
                 let linker_tool = build_cfg.linker_tool.as_ref().with_context(|| {
                     format!(
-                        "Failed to find linker tool for library configuration: {}",
+                        "Failed to find linker tool for exe/dll configuration: {}",
                         vcproj.name
                     )
                 })?;
                 let _flags = linker_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
-                // println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, _flags);
             }
             _ => (),
         }

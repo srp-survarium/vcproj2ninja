@@ -2,7 +2,7 @@ use vs2008_parser_proc::{ParseXml, flag_enum};
 
 use super::macros::*;
 use super::utils::pathdiff;
-use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
+use super::{Configuration, File, Files, Filter, Flags, MsBuildEnvironment, VCProject};
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -34,7 +34,7 @@ impl LibTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> String {
+    ) -> Flags {
         let Self {
             additional_options,
             output_file,
@@ -43,15 +43,12 @@ impl LibTool {
             suppress_startup_banner: _,
         } = self;
 
-        let output_file = output_file
+        let output_file_pattern = output_file
             .as_deref()
             .unwrap_or("$(OutDir)\\$(ProjectName).lib");
+        let output_file = env.expand(output_file_pattern).trim().trim_matches('"').to_string();
 
-        let mut result = String::new();
-
-        let out_file = env.expand(output_file);
-        let out_file = out_file.trim().trim_matches('"');
-        write!(result, " /OUT:\"{out_file}\"").unwrap();
+        let mut flags = String::new();
 
         for lib_path in additional_library_directories
             .iter()
@@ -59,39 +56,35 @@ impl LibTool {
             .filter(|s| !s.is_empty())
         {
             let lib_path = env.expand(lib_path);
-            let lib_path = lib_path.trim().trim_matches('"');
-
-            write!(result, " /LIBPATH:\"{lib_path}\"").unwrap();
+            let lib_path = lib_path.trim().trim_matches('"').to_string();
+            write!(flags, " /LIBPATH:\"{lib_path}\"").unwrap();
         }
 
-        for lib_path in ignore_default_library_names
+        for lib_name in ignore_default_library_names
             .iter()
             .flatten()
             .filter(|s| !s.is_empty())
         {
-            let lib_path = env.expand(lib_path);
-            let lib_path = lib_path.trim().trim_matches('"');
-
-            write!(result, " /NODEFAULTLIB:\"{lib_path}\"").unwrap();
+            let lib_name = env.expand(lib_name);
+            let lib_name = lib_name.trim().trim_matches('"').to_string();
+            write!(flags, " /NODEFAULTLIB:\"{lib_name}\"").unwrap();
         }
 
         if matches!(cfg.whole_program_optimization, Some(true)) {
-            result.push(' ');
-            result.push_str("/LTCG");
+            flags.push(' ');
+            flags.push_str("/LTCG");
         }
 
         if let Some(additional_options) = additional_options
             && !additional_options.is_empty()
         {
-            result.push(' ');
-            result.push_str(additional_options);
+            flags.push(' ');
+            flags.push_str(additional_options);
         }
 
         let files = Self::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        result.push_str(&files.join("\n"));
-
-        result
+        Flags { output_file, flags: flags.trim().to_string(), files }
     }
 
     pub fn file_flags(

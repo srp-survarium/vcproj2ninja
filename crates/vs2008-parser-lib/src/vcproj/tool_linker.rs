@@ -3,7 +3,7 @@ use vs2008_parser_proc::{flag_enum, ParseXml};
 use super::macros::*;
 use super::utils;
 use super::ConfigurationType;
-use super::{Configuration, LibTool, MsBuildEnvironment, VCProject};
+use super::{Configuration, Flags, LibTool, MsBuildEnvironment, VCProject};
 
 use std::path::Path;
 
@@ -201,13 +201,31 @@ macro_rules! unimplemented_flag {
 }
 
 impl LinkerTool {
+    pub fn to_flags_for_lib(
+        vcproj_rpath: &str,
+        cfg: &Configuration,
+        vcproject: &VCProject,
+        env: MsBuildEnvironment,
+    ) -> Flags {
+        let output_file_pattern = match cfg.configuration_type {
+            ConfigurationType::_1 => "$(OutDir)\\$(ProjectName).exe",
+            ConfigurationType::_2 => "$(OutDir)\\$(ProjectName).dll",
+            _ => unimplemented!(),
+        };
+        let output_file = utils::clean(&env.expand(output_file_pattern)).to_string();
+
+        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
+
+        Flags { output_file, flags: "/LIB".to_string(), files }
+    }
+
     pub fn to_flags(
         &self,
         vcproj_rpath: &str,
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> String {
+    ) -> Flags {
         let Self {
             additional_options,
             additional_dependencies,
@@ -257,24 +275,23 @@ impl LinkerTool {
         unimplemented_flag!(false: map_exports);
         unimplemented_flag!(false: generate_map_file);
 
-        let mut flags = vec![];
-
-        let output_file = output_file
+        let output_file_pattern = output_file
             .as_deref()
             .unwrap_or_else(|| match cfg.configuration_type {
                 ConfigurationType::_1 => "$(OutDir)\\$(ProjectName).exe",
                 ConfigurationType::_2 => "$(OutDir)\\$(ProjectName).dll",
                 _ => unimplemented!(),
             });
-        let output_file = env.expand(output_file);
-        let output_file = utils::clean(&output_file);
-        flags.push(format!("/OUT:\"{output_file}\""));
+        let output_file_expanded = env.expand(output_file_pattern);
+        let output_file = utils::clean(&output_file_expanded).to_string();
+
+        let mut flags = vec![];
 
         append_flags!(flags, [link_incremental]);
 
         for lib_path in additional_library_directories.iter().flatten() {
             let lib_path = env.expand(lib_path);
-            let lib_path = utils::clean(&lib_path);
+            let lib_path = utils::clean(&lib_path).to_string();
 
             if !lib_path.is_empty() {
                 flags.push(format!("/LIBPATH:\"{lib_path}\""));
@@ -289,7 +306,7 @@ impl LinkerTool {
         if generate_manifest {
             flags.push("/MANIFEST".to_string());
 
-            let target_file_name = Path::new(output_file)
+            let target_file_name = Path::new(&output_file)
                 .file_name()
                 .expect("OutputFile always points to something")
                 .to_str()
@@ -298,8 +315,8 @@ impl LinkerTool {
             let manifest_file = env.expand(&format!(
                 "$(IntDir)\\{target_file_name}.intermediate.manifest"
             ));
-            // /MANIFESTFILE:"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Release/nvtt\vostok_nvtt.dll.intermediate.manifest"
-            let manifest_file = utils::clean(&manifest_file);
+            // /MANIFESTFILE:"E:\...\vostok_nvtt.dll.intermediate.manifest"
+            let manifest_file = utils::clean(&manifest_file).to_string();
             flags.push(format!("/MANIFESTFILE:\"{manifest_file}\""));
 
             // @TODO: VS2008 SP1 default UAC fragment. Extend with struct fields when added.
@@ -308,7 +325,7 @@ impl LinkerTool {
         }
 
         for lib_name in ignore_default_library_names.iter().flatten() {
-            let lib_name = utils::clean(lib_name);
+            let lib_name = utils::clean(lib_name).to_string();
 
             if !lib_name.is_empty() {
                 flags.push(format!("/NODEFAULTLIB:\"{lib_name}\""));
@@ -325,7 +342,7 @@ impl LinkerTool {
         append_flags!(flags, [generate_debug_information]);
         {
             let program_database_file = program_database_file.clone().unwrap_or_else(|| {
-                Path::new(output_file)
+                Path::new(&output_file)
                     .with_extension("pdb")
                     .normalize_lexically()
                     .expect("Requires normalization to match original flags")
@@ -334,7 +351,7 @@ impl LinkerTool {
                     .expect("Original 'output_file' is String")
             });
             let program_database_file = env.expand(&program_database_file);
-            let program_database_file = utils::clean(&program_database_file);
+            let program_database_file = utils::clean(&program_database_file).to_string();
 
             flags.push(format!("/PDB:\"{program_database_file}\""));
         }
@@ -374,7 +391,7 @@ impl LinkerTool {
                 unimplemented!("TODO: Figure out what the default should be")
             };
             let import_library = env.expand(import_library);
-            let import_library = utils::clean(&import_library);
+            let import_library = utils::clean(&import_library).to_string();
             flags.push(format!("/IMPLIB:\"{import_library}\""));
         }
 
@@ -390,13 +407,8 @@ impl LinkerTool {
 
         append_flags!(flags, [additional_options, additional_dependencies]);
 
-        flags.extend(LibTool::file_flags(
-            &vcproject.files,
-            &cfg.name,
-            vcproj_rpath,
-            env,
-        ));
+        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        flags.join("\n ")
+        Flags { output_file, flags: flags.join(" "), files }
     }
 }
