@@ -6,7 +6,7 @@ if not defined ROOT_DIR       set "ROOT_DIR=%~dp0\.."
 for %%I in ("%ROOT_DIR%")  do set "ROOT_DIR=%%~fI"
 
 if not defined VOSTOK_DIR     set "VOSTOK_DIR=%ROOT_DIR%\vostok"
-if not defined OUTPUT_DIR     set "OUTPUT_DIR=%ROOT_DIR%\ninja-out"
+if not defined OUTPUT_DIR     set "OUTPUT_DIR=%VOSTOK_DIR%\binaries\ninja"
 
 set "SLN_PATH=%VOSTOK_DIR%\sources\vostok v2.0.sln"
 
