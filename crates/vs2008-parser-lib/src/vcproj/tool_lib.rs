@@ -48,7 +48,7 @@ impl LibTool {
             .unwrap_or("$(OutDir)\\$(ProjectName).lib");
         let output_file = env.expand(output_file_pattern).trim().trim_matches('"').to_string();
 
-        let mut flags = String::new();
+        let mut flags = format!("/OUT:\"{output_file}\"");
 
         for lib_path in additional_library_directories
             .iter()

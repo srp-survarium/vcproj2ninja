@@ -36,17 +36,17 @@ fn write_rules(out: &mut impl Write) -> std::fmt::Result {
     writeln!(out, "rule cl")?;
     writeln!(out, "  command = cl @$rspfile")?;
     writeln!(out, "  rspfile = $out.rsp")?;
-    writeln!(out, "  rspfile_content = $flags /Fo\"$obj_dir\" $in")?;
+    writeln!(out, "  rspfile_content = $flags $in")?;
     writeln!(out)?;
     writeln!(out, "rule lib")?;
     writeln!(out, "  command = lib @$rspfile")?;
     writeln!(out, "  rspfile = $out.rsp")?;
-    writeln!(out, "  rspfile_content = /OUT:\"$out\" $flags $in")?;
+    writeln!(out, "  rspfile_content = $flags $in")?;
     writeln!(out)?;
     writeln!(out, "rule link")?;
     writeln!(out, "  command = link @$rspfile")?;
     writeln!(out, "  rspfile = $out.rsp")?;
-    writeln!(out, "  rspfile_content = /OUT:\"$out\" $flags $in")?;
+    writeln!(out, "  rspfile_content = $flags $in")?;
     writeln!(out)?;
     Ok(())
 }
@@ -78,7 +78,6 @@ fn write_cl(out: &mut impl Write, flags: &Flags) -> std::fmt::Result {
     }
     writeln!(out)?;
     writeln!(out, "  flags = {}", flags.flags.trim())?;
-    writeln!(out, "  obj_dir = {obj_dir}")?;
     writeln!(out)?;
 
     Ok(())

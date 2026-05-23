@@ -390,7 +390,7 @@ impl CompilerTool {
             detect_64_bit_portability_problems,
             //
             precompiled_header_file,
-            object_file: _,
+            object_file,
             program_data_base_file_name,
             //
             precompiled_header_through,
@@ -480,6 +480,8 @@ impl CompilerTool {
             }
             _ => None,
         };
+
+        let object_file = object_file.as_deref().unwrap_or("$(IntDir)");
 
         let precompiled_header_file = match (precompiled_header_file, use_precompiled_header) {
             (None, Some(use_precompiled_header))
@@ -573,6 +575,22 @@ impl CompilerTool {
             result.push_str("/Fp");
             result.push('"');
             result.push_str(&env.expand(precompiled_header_file));
+            result.push('"');
+        }
+
+        // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
+        if !object_file.is_empty() {
+            let object_file = env.expand(object_file);
+
+            result.push(' ');
+            result.push_str("/Fo");
+            result.push('"');
+            result.push_str(&object_file);
+
+            // TODO: msbuild doesn't actually match on extension the same way.
+            if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
+                result.push('\\');
+            }
             result.push('"');
         }
 

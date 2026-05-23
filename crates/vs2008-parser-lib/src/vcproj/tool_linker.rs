@@ -216,7 +216,7 @@ impl LinkerTool {
 
         let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        Flags { output_file, flags: "/LIB".to_string(), files }
+        Flags { output_file: output_file.clone(), flags: format!("/LIB /OUT:\"{output_file}\""), files }
     }
 
     pub fn to_flags(
@@ -285,7 +285,7 @@ impl LinkerTool {
         let output_file_expanded = env.expand(output_file_pattern);
         let output_file = utils::clean(&output_file_expanded).to_string();
 
-        let mut flags = vec![];
+        let mut flags = vec![format!("/OUT:\"{output_file}\"")];
 
         append_flags!(flags, [link_incremental]);
 
