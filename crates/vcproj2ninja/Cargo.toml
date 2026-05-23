@@ -1,0 +1,13 @@
+[package]
+name = "vcproj2ninja"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+vs2008-parser-lib = { workspace = true }

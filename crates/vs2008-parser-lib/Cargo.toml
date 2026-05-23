@@ -1,0 +1,17 @@
+[package]
+name = "vs2008-parser-lib"
+version = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+nom = { workspace = true }
+roxmltree = { workspace = true }
+uuid = { workspace = true }
+
+vs2008-parser-proc = { workspace = true }
