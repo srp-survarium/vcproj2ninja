@@ -207,16 +207,18 @@ impl LinkerTool {
         vcproject: &VCProject,
         env: MsBuildEnvironment,
     ) -> Flags {
-        let output_file_pattern = match cfg.configuration_type {
+        let output_file = match cfg.configuration_type {
             ConfigurationType::_1 => "$(OutDir)\\$(ProjectName).exe",
             ConfigurationType::_2 => "$(OutDir)\\$(ProjectName).dll",
             _ => unimplemented!(),
         };
-        let output_file = utils::clean(&env.expand(output_file_pattern)).to_string();
+        let output_file = env.expand(output_file);
+        let output_file = utils::clean(&output_file);
 
         let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        Flags { output_file: output_file.clone(), flags: format!("/LIB /OUT:\"{output_file}\""), files }
+        let flags = vec!["/LIB".to_string(), format!("/OUT:\"{output_file}\"")].join(" ");
+        Flags { output_file: output_file.to_string(), flags, files }
     }
 
     pub fn to_flags(
@@ -275,15 +277,15 @@ impl LinkerTool {
         unimplemented_flag!(false: map_exports);
         unimplemented_flag!(false: generate_map_file);
 
-        let output_file_pattern = output_file
+        let output_file = output_file
             .as_deref()
             .unwrap_or_else(|| match cfg.configuration_type {
                 ConfigurationType::_1 => "$(OutDir)\\$(ProjectName).exe",
                 ConfigurationType::_2 => "$(OutDir)\\$(ProjectName).dll",
                 _ => unimplemented!(),
             });
-        let output_file_expanded = env.expand(output_file_pattern);
-        let output_file = utils::clean(&output_file_expanded).to_string();
+        let output_file = env.expand(output_file);
+        let output_file = utils::clean(&output_file);
 
         let mut flags = vec![format!("/OUT:\"{output_file}\"")];
 
@@ -291,7 +293,7 @@ impl LinkerTool {
 
         for lib_path in additional_library_directories.iter().flatten() {
             let lib_path = env.expand(lib_path);
-            let lib_path = utils::clean(&lib_path).to_string();
+            let lib_path = utils::clean(&lib_path);
 
             if !lib_path.is_empty() {
                 flags.push(format!("/LIBPATH:\"{lib_path}\""));
@@ -316,7 +318,7 @@ impl LinkerTool {
                 "$(IntDir)\\{target_file_name}.intermediate.manifest"
             ));
             // /MANIFESTFILE:"E:\...\vostok_nvtt.dll.intermediate.manifest"
-            let manifest_file = utils::clean(&manifest_file).to_string();
+            let manifest_file = utils::clean(&manifest_file);
             flags.push(format!("/MANIFESTFILE:\"{manifest_file}\""));
 
             // @TODO: VS2008 SP1 default UAC fragment. Extend with struct fields when added.
@@ -325,7 +327,7 @@ impl LinkerTool {
         }
 
         for lib_name in ignore_default_library_names.iter().flatten() {
-            let lib_name = utils::clean(lib_name).to_string();
+            let lib_name = utils::clean(lib_name);
 
             if !lib_name.is_empty() {
                 flags.push(format!("/NODEFAULTLIB:\"{lib_name}\""));
@@ -351,7 +353,7 @@ impl LinkerTool {
                     .expect("Original 'output_file' is String")
             });
             let program_database_file = env.expand(&program_database_file);
-            let program_database_file = utils::clean(&program_database_file).to_string();
+            let program_database_file = utils::clean(&program_database_file);
 
             flags.push(format!("/PDB:\"{program_database_file}\""));
         }
@@ -391,7 +393,7 @@ impl LinkerTool {
                 unimplemented!("TODO: Figure out what the default should be")
             };
             let import_library = env.expand(import_library);
-            let import_library = utils::clean(&import_library).to_string();
+            let import_library = utils::clean(&import_library);
             flags.push(format!("/IMPLIB:\"{import_library}\""));
         }
 
@@ -409,6 +411,6 @@ impl LinkerTool {
 
         let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        Flags { output_file, flags: flags.join(" "), files }
+        Flags { output_file: output_file.to_string(), flags: flags.join(" "), files }
     }
 }

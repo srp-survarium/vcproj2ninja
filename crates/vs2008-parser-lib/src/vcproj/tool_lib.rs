@@ -6,7 +6,6 @@ use super::{Configuration, File, Files, Filter, Flags, MsBuildEnvironment, VCPro
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, ParseXml)]
@@ -43,12 +42,14 @@ impl LibTool {
             suppress_startup_banner: _,
         } = self;
 
-        let output_file_pattern = output_file
+        let output_file = output_file
             .as_deref()
             .unwrap_or("$(OutDir)\\$(ProjectName).lib");
-        let output_file = env.expand(output_file_pattern).trim().trim_matches('"').to_string();
 
-        let mut flags = format!("/OUT:\"{output_file}\"");
+        let out_file = env.expand(output_file);
+        let out_file = out_file.trim().trim_matches('"');
+
+        let mut flags = vec![format!("/OUT:\"{out_file}\"")];
 
         for lib_path in additional_library_directories
             .iter()
@@ -56,35 +57,33 @@ impl LibTool {
             .filter(|s| !s.is_empty())
         {
             let lib_path = env.expand(lib_path);
-            let lib_path = lib_path.trim().trim_matches('"').to_string();
-            write!(flags, " /LIBPATH:\"{lib_path}\"").unwrap();
+            let lib_path = lib_path.trim().trim_matches('"');
+            flags.push(format!("/LIBPATH:\"{lib_path}\""));
         }
 
-        for lib_name in ignore_default_library_names
+        for lib_path in ignore_default_library_names
             .iter()
             .flatten()
             .filter(|s| !s.is_empty())
         {
-            let lib_name = env.expand(lib_name);
-            let lib_name = lib_name.trim().trim_matches('"').to_string();
-            write!(flags, " /NODEFAULTLIB:\"{lib_name}\"").unwrap();
+            let lib_path = env.expand(lib_path);
+            let lib_path = lib_path.trim().trim_matches('"');
+            flags.push(format!("/NODEFAULTLIB:\"{lib_path}\""));
         }
 
         if matches!(cfg.whole_program_optimization, Some(true)) {
-            flags.push(' ');
-            flags.push_str("/LTCG");
+            flags.push("/LTCG".to_string());
         }
 
         if let Some(additional_options) = additional_options
             && !additional_options.is_empty()
         {
-            flags.push(' ');
-            flags.push_str(additional_options);
+            flags.push(additional_options.clone());
         }
 
         let files = Self::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
-        Flags { output_file, flags: flags.trim().to_string(), files }
+        Flags { output_file: out_file.to_string(), flags: flags.join(" "), files }
     }
 
     pub fn file_flags(
