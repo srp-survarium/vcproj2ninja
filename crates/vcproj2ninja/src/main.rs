@@ -2,6 +2,8 @@
 #![allow(unused_imports)]
 #![feature(os_string_truncate)]
 
+mod ninja;
+
 use std::path::Path;
 
 use anyhow::Context;
