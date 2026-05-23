@@ -4,6 +4,7 @@
 
 mod ninja;
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Context;
@@ -26,7 +27,7 @@ pub struct Cli {
     #[arg(long)]
     pub configuration_platform: String,
 
-    /// Directory to write generated .ninja files into.
+    /// Directory to write generated .ninja files into (cleared on each run).
     #[arg(long, value_hint = clap::ValueHint::DirPath)]
     pub output_dir: std::path::PathBuf,
 }
@@ -38,8 +39,6 @@ fn main() -> anyhow::Result<()> {
         configuration_platform,
         output_dir,
     } = Cli::parse();
-
-    std::fs::create_dir_all(&output_dir)?;
 
     let sln = std::fs::read_to_string(&sln_path)?;
     let sln = match sln::Sln::parse(&sln) {
@@ -62,7 +61,8 @@ fn main() -> anyhow::Result<()> {
 
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
 
-    let mut subninja_names: Vec<String> = vec![];
+    // Phase 1: collect all ninja files before touching the output directory.
+    let mut collected: Vec<(String, NinjaFile)> = vec![];
 
     for dep in deps {
         project_path.as_mut_os_string().truncate(base_len);
@@ -138,24 +138,31 @@ fn main() -> anyhow::Result<()> {
             ),
         };
 
-        let ninja_file = NinjaFile { cl: cl_flags, final_step };
+        collected.push((dep.name.clone(), NinjaFile { cl: cl_flags, final_step }));
+    }
 
-        // Use the vcproj relative path (unique in the sln) to derive the output path,
-        // so projects with the same display name in different subdirectories don't collide.
-        let ninja_rel = Path::new(&dep.path).with_extension("ninja");
-        let out_path = output_dir.join(&ninja_rel);
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    // Phase 2: clear and recreate the output directory.
+    if output_dir.exists() {
+        std::fs::remove_dir_all(&output_dir)?;
+    }
+    std::fs::create_dir_all(&output_dir)?;
+
+    // Phase 3: assign unique filenames (conflict → _2, _3, …) and write.
+    let mut used: HashSet<String> = HashSet::new();
+    let mut subninja_names: Vec<String> = vec![];
+
+    for (base_name, ninja_file) in collected {
+        let stem = unique_stem(&mut used, &base_name);
+        let file_name = format!("{stem}.ninja");
+
         let mut content = String::new();
-        ninja_file
-            .write(&mut content)
-            .expect("writing to String never fails");
+        ninja_file.write(&mut content).expect("writing to String never fails");
+
+        let out_path = output_dir.join(&file_name);
         std::fs::write(&out_path, &content)
             .with_context(|| format!("Failed to write '{}'", out_path.display()))?;
 
-        // subninja paths use forward slashes on all platforms.
-        subninja_names.push(ninja_rel.to_string_lossy().replace('\\', "/"));
+        subninja_names.push(file_name);
     }
 
     // Top-level build.ninja that includes all per-project files.
@@ -172,3 +179,16 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
