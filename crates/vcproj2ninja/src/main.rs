@@ -204,7 +204,16 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
-    let base: String = base.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+    let base: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     if used.insert(base.clone()) {
         return base;
     }

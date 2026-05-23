@@ -124,11 +124,13 @@ impl LibTool {
         let mut result = vec![];
         for (source_path, obj_override) in source_files {
             let mut env = env;
-            env.input_name = source_path;
+            env.input_name = Path::new(source_path)
+                .file_stem()
+                .map(|x| x.to_str().expect("Path was constructed from String"))
+                .expect("source_path cannot be an empty path");
 
             let obj_override = obj_override.map(|obj_override| {
                 let obj_override = env.expand(obj_override);
-                println!("{obj_override}");
                 let obj_override = obj_override.trim().trim_matches('"').to_string();
                 assert_eq!(
                     Path::new(&obj_override).extension(),

@@ -1,5 +1,5 @@
 use quote::quote;
-use syn::{spanned::Spanned, Data, Fields, GenericArgument, LitStr, PathArguments, Token, Type};
+use syn::{Data, Fields, GenericArgument, LitStr, PathArguments, Token, Type, spanned::Spanned};
 
 use crate::bail;
 

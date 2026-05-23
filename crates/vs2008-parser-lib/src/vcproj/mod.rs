@@ -6,7 +6,7 @@ mod tool_lib;
 mod tool_linker;
 mod utils;
 
-use vs2008_parser_proc::{flag_enum, ParseXml};
+use vs2008_parser_proc::{ParseXml, flag_enum};
 
 use macros::{optparse, parse, parse_attrs};
 
