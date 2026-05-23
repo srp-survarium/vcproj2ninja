@@ -140,8 +140,13 @@ fn main() -> anyhow::Result<()> {
 
         let ninja_file = NinjaFile { cl: cl_flags, final_step };
 
-        let file_name = format!("{}.ninja", sanitize_name(&dep.name));
-        let out_path = output_dir.join(&file_name);
+        // Use the vcproj relative path (unique in the sln) to derive the output path,
+        // so projects with the same display name in different subdirectories don't collide.
+        let ninja_rel = Path::new(&dep.path).with_extension("ninja");
+        let out_path = output_dir.join(&ninja_rel);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut content = String::new();
         ninja_file
             .write(&mut content)
@@ -149,7 +154,8 @@ fn main() -> anyhow::Result<()> {
         std::fs::write(&out_path, &content)
             .with_context(|| format!("Failed to write '{}'", out_path.display()))?;
 
-        subninja_names.push(file_name);
+        // subninja paths use forward slashes on all platforms.
+        subninja_names.push(ninja_rel.to_string_lossy().replace('\\', "/"));
     }
 
     // Top-level build.ninja that includes all per-project files.
@@ -166,8 +172,3 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
-        .collect()
-}
