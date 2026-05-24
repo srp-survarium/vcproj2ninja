@@ -15,6 +15,8 @@ pub struct NinjaFile {
     pub final_step: FinalStep,
     /// Absolute path to the vcproj directory; commands cd here before running.
     pub proj_dir: String,
+    /// Output file paths of sln-level dependencies; emitted as order-only deps (`||`).
+    pub depends_on: Vec<String>,
 }
 
 /// All text and rsp files produced for one project.
@@ -41,14 +43,14 @@ impl NinjaFile {
         let output_file = match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
-                write_final(&mut out, "lib", flags, &rsp_path, &self.proj_dir).unwrap();
+                write_final(&mut out, "lib", flags, &rsp_path, &self.proj_dir, &self.depends_on).unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
 
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
-                write_final(&mut out, "link", flags, &rsp_path, &self.proj_dir).unwrap();
+                write_final(&mut out, "link", flags, &rsp_path, &self.proj_dir, &self.depends_on).unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
@@ -135,7 +137,7 @@ fn write_cl_tree(
     counter: &mut usize,
     proj_dir: &str,
     rsp_files: &mut Vec<(PathBuf, String)>,
-    order_only_dep: Option<&std::path::Path>,
+    depends_on_dep: Option<&std::path::Path>,
 ) -> std::fmt::Result {
     let i = *counter;
     *counter += 1;
@@ -143,7 +145,7 @@ fn write_cl_tree(
 
     let implicit_out = tree.dependants.first().map(|(_, p)| p.as_path());
 
-    write_cl_node(out, &tree.flags, &rsp_path, proj_dir, implicit_out, order_only_dep)?;
+    write_cl_node(out, &tree.flags, &rsp_path, proj_dir, implicit_out, depends_on_dep)?;
     rsp_files.push((rsp_path, tree.flags.rsp_file_content()));
 
     for (dep_tree, pch_path) in &tree.dependants {
@@ -159,7 +161,7 @@ fn write_cl_node(
     rsp_path: &Path,
     proj_dir: &str,
     implicit_out: Option<&std::path::Path>,
-    order_only_dep: Option<&std::path::Path>,
+    depends_on_dep: Option<&std::path::Path>,
 ) -> std::fmt::Result {
     let Flags { output_file, flags, rsp_flags: _, files } = flags;
 
@@ -179,7 +181,7 @@ fn write_cl_node(
     for src in files {
         write!(out, " {}", ninja_path(proj_dir, src))?;
     }
-    if let Some(dep) = order_only_dep {
+    if let Some(dep) = depends_on_dep {
         write!(out, " || {}", ninja_path("", dep.to_str().expect("pch dep is UTF-8")))?;
     }
     writeln!(out)?;
@@ -195,6 +197,7 @@ fn write_final(
     flags: &Flags,
     rsp_path: &Path,
     proj_dir: &str,
+    depends_on: &[String],
 ) -> std::fmt::Result {
     let Flags {
         output_file,
@@ -205,17 +208,27 @@ fn write_final(
 
     writeln!(out, "build $")?;
     writeln!(out, "    {} $", ninja_path("", output_file))?;
-    if files.is_empty() {
+
+    let has_oo = !depends_on.is_empty();
+
+    if files.is_empty() && !has_oo {
         writeln!(out, "    : {rule}")?;
     } else {
         writeln!(out, "    : {rule} $")?;
-        let last = files.len() - 1;
+        let last_file = files.len().saturating_sub(1);
         for (i, file) in files.iter().enumerate() {
-            if i < last {
+            if i < last_file || has_oo {
                 writeln!(out, "    {} $", ninja_path(proj_dir, file))?;
             } else {
                 writeln!(out, "    {}", ninja_path(proj_dir, file))?;
             }
+        }
+        if has_oo {
+            write!(out, "    ||")?;
+            for dep in depends_on {
+                write!(out, " {}", ninja_path("", dep))?;
+            }
+            writeln!(out)?;
         }
     }
 

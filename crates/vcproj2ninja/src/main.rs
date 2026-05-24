@@ -2,10 +2,11 @@
 
 mod ninja;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use clap::Parser;
+use uuid::Uuid;
 
 use ninja::{FinalStep, NinjaFile};
 use vs2008_parser_lib::vcproj::{ConfigurationType, MsBuildEnvironment};
@@ -64,7 +65,8 @@ fn main() -> anyhow::Result<()> {
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
 
     // Phase 1: collect all ninja files before touching the output directory.
-    let mut ninja_files: Vec<(String, NinjaFile)> = vec![];
+    let mut ninja_files: Vec<(Uuid, String, NinjaFile)> = vec![];
+    let mut guid_to_output: HashMap<Uuid, String> = HashMap::new();
 
     for dep in deps {
         project_path.as_mut_os_string().truncate(base_len);
@@ -151,18 +153,43 @@ fn main() -> anyhow::Result<()> {
             ),
         };
 
+        let output_file = match &final_step {
+            FinalStep::Lib(f) => f.output_file.clone(),
+            FinalStep::Link(f) => f.output_file.clone(),
+        };
+        guid_to_output.insert(vcproj.guid, output_file);
+
         ninja_files.push((
+            vcproj.guid,
             dep.name.clone(),
             NinjaFile {
                 cl: cl_flags,
                 final_step,
                 proj_dir,
+                depends_on: vec![],
             },
         ));
     }
 
+    // Populate order-only deps from sln project dependencies.
+    let sln_projects: HashMap<Uuid, &sln::Project> =
+        sln.projects.iter().map(|p| (p.uuid, p)).collect();
+    for (guid, _name, ninja_file) in &mut ninja_files {
+        let Some(sln_proj) = sln_projects.get(guid) else {
+            continue;
+        };
+        let Some(section_deps) = &sln_proj.section_dependencies else {
+            continue;
+        };
+        for dep in &section_deps.deps {
+            if let Some(output) = guid_to_output.get(&dep.uuid) {
+                ninja_file.depends_on.push(output.clone());
+            }
+        }
+    }
+
     if verbose {
-        for (name, ninja_file) in &ninja_files {
+        for (_guid, name, ninja_file) in &ninja_files {
             for tree in &ninja_file.cl {
                 print_tree_flags("cl", name, tree);
             }
@@ -186,7 +213,7 @@ fn main() -> anyhow::Result<()> {
     let mut used: HashSet<String> = HashSet::new();
     let mut subninja_names: Vec<String> = vec![];
 
-    for (base_name, ninja_file) in ninja_files {
+    for (_guid, base_name, ninja_file) in ninja_files {
         let stem = unique_stem(&mut used, &base_name);
         let output = ninja_file.write(&stem, &rsp_dir);
 
