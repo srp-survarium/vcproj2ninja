@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 
-use vs2008_parser_lib::vcproj::Flags;
+use vs2008_parser_lib::vcproj::{Flags, FlagsTree};
 
 pub enum FinalStep {
     /// Static lib: lib then link /LIB, both sharing the same rsp.
@@ -11,7 +11,7 @@ pub enum FinalStep {
 }
 
 pub struct NinjaFile {
-    pub cl: Vec<Flags>,
+    pub cl: Vec<FlagsTree>,
     pub final_step: FinalStep,
     /// Absolute path to the vcproj directory; commands cd here before running.
     pub proj_dir: String,
@@ -33,10 +33,9 @@ impl NinjaFile {
         writeln!(out).unwrap();
         write_rules(&mut out).unwrap();
 
-        for (i, cl) in self.cl.iter().enumerate() {
-            let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
-            write_cl(&mut out, cl, &rsp_path, &self.proj_dir).unwrap();
-            rsp_files.push((rsp_path, cl.rsp_file_content()));
+        let mut counter = 0usize;
+        for tree in &self.cl {
+            write_cl_tree(&mut out, tree, rsp_dir, stem, &mut counter, &self.proj_dir, &mut rsp_files, None).unwrap();
         }
 
         let output_file = match &self.final_step {
@@ -110,47 +109,78 @@ rule link
     writeln!(out, "{}", WRITE_RULES)
 }
 
-fn write_cl(
+fn compute_obj(output_file: &str, src: &str) -> String {
+    if Path::new(output_file)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("obj"))
+    {
+        output_file.to_string()
+    } else {
+        let sep = if output_file.ends_with(['\\', '/']) { "" } else { "\\" };
+        let stem = Path::new(src)
+            .file_stem()
+            .expect("source has stem")
+            .to_str()
+            .expect("valid UTF-8");
+        format!("{output_file}{sep}{stem}.obj")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_cl_tree(
+    out: &mut impl FmtWrite,
+    tree: &FlagsTree,
+    rsp_dir: &Path,
+    stem: &str,
+    counter: &mut usize,
+    proj_dir: &str,
+    rsp_files: &mut Vec<(PathBuf, String)>,
+    order_only_dep: Option<&std::path::Path>,
+) -> std::fmt::Result {
+    let i = *counter;
+    *counter += 1;
+    let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
+
+    let implicit_out = tree.dependants.first().map(|(_, p)| p.as_path());
+
+    write_cl_node(out, &tree.flags, &rsp_path, proj_dir, implicit_out, order_only_dep)?;
+    rsp_files.push((rsp_path, tree.flags.rsp_file_content()));
+
+    for (dep_tree, pch_path) in &tree.dependants {
+        write_cl_tree(out, dep_tree, rsp_dir, stem, counter, proj_dir, rsp_files, Some(pch_path))?;
+    }
+
+    Ok(())
+}
+
+fn write_cl_node(
     out: &mut impl FmtWrite,
     flags: &Flags,
     rsp_path: &Path,
     proj_dir: &str,
+    implicit_out: Option<&std::path::Path>,
+    order_only_dep: Option<&std::path::Path>,
 ) -> std::fmt::Result {
-    let Flags {
-        output_file,
-        flags,
-        rsp_flags: _,
-        files,
-    } = flags;
+    let Flags { output_file, flags, rsp_flags: _, files } = flags;
+
+    if files.is_empty() {
+        return Ok(());
+    }
 
     writeln!(out, "build $")?;
     for src in files {
-        let obj_file = {
-            if Path::new(output_file)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("obj"))
-            {
-                output_file.clone()
-            } else {
-                let sep = if output_file.ends_with(['\\', '/']) {
-                    ""
-                } else {
-                    "\\"
-                };
-                let stem = Path::new(src)
-                    .file_stem()
-                    .expect("source has stem")
-                    .to_str()
-                    .expect("valid UTF-8");
-                format!("{output_file}{sep}{stem}.obj")
-            }
-        };
-        writeln!(out, "    {} $", ninja_path("", &obj_file))?;
+        writeln!(out, "    {} $", ninja_path("", &compute_obj(output_file, src)))?;
+    }
+    if let Some(p) = implicit_out {
+        writeln!(out, "    | {} $", ninja_path("", p.to_str().expect("pch path is UTF-8")))?;
     }
 
     write!(out, "    : cl")?;
     for src in files {
         write!(out, " {}", ninja_path(proj_dir, src))?;
+    }
+    if let Some(dep) = order_only_dep {
+        write!(out, " || {}", ninja_path("", dep.to_str().expect("pch dep is UTF-8")))?;
     }
     writeln!(out)?;
 

@@ -1,13 +1,13 @@
 use vs2008_parser_proc::{ParseXml, flag_enum};
 
-use super::flags::{Flags, append_flags};
+use super::flags::{Flags, FlagsTree, append_flags};
 use super::macros::*;
 use super::{CharacterSet, ConfigurationType};
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, ParseXml, Eq, PartialEq, Hash, Clone, Default)]
 #[parse_xml(
@@ -307,8 +307,10 @@ impl CompilerTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> Vec<Flags> {
-        let mut result = vec![];
+    ) -> Vec<FlagsTree> {
+        let mut result: Vec<FlagsTree> = vec![];
+        let mut pch_root_idx: Option<usize> = None;
+        let mut pch_path: Option<PathBuf> = None;
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
             .into_iter()
@@ -339,16 +341,26 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
-            let mut flags = tool.to_flags_impl(cfg, env);
+            let (mut flags, maybe_pch) = tool.to_flags_impl(cfg, env);
             flags.files = files.iter().map(|file| file.to_string()).collect();
 
-            result.push(flags);
+            let tree = FlagsTree { flags, dependants: vec![] };
+
+            if let Some(p) = maybe_pch {
+                pch_root_idx = Some(result.len());
+                pch_path = Some(p);
+                result.push(tree);
+            } else if let (Some(idx), Some(p)) = (pch_root_idx, &pch_path) {
+                result[idx].dependants.push((tree, p.clone()));
+            } else {
+                result.push(tree);
+            }
         }
 
         result
     }
 
-    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> Flags {
+    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> (Flags, Option<PathBuf>) {
         let Self {
             additional_options,
             optimization,
@@ -564,11 +576,19 @@ impl CompilerTool {
         );
 
         // /Fp"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vostok_fs-static-gold.pch"
-        if let Some(precompiled_header_file) = precompiled_header_file
+        let pch_output = if let Some(precompiled_header_file) = precompiled_header_file
             && !precompiled_header_file.is_empty()
         {
-            rsp_flags.push(format!("/Fp\"{}\"", env.expand(precompiled_header_file)));
-        }
+            let expanded = env.expand(precompiled_header_file);
+            rsp_flags.push(format!("/Fp\"{expanded}\""));
+            if matches!(use_precompiled_header, Some(UsePrecompiledHeader::_1)) {
+                Some(PathBuf::from(expanded))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
         let output_file = if !object_file.is_empty() {
@@ -635,12 +655,15 @@ impl CompilerTool {
         {
             rsp_flags.push(additional_options.clone());
         }
-        Flags {
-            output_file,
-            flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
-            rsp_flags: rsp_flags.join(" "),
-            files: vec![],
-        }
+        (
+            Flags {
+                output_file,
+                flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
+                rsp_flags: rsp_flags.join(" "),
+                files: vec![],
+            },
+            pch_output,
+        )
     }
 
     fn parse_files<'a>(

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 macro_rules! append_flags {
     ($vec:ident, [$($opt:expr),* $(,)?]) => {{
         $(
@@ -42,4 +44,12 @@ impl Flags {
 
         content
     }
+}
+
+pub struct FlagsTree {
+    pub flags: Flags,
+    /// Children that depend on an artifact this node produces (e.g. a .pch file).
+    /// The `PathBuf` is the artifact path: listed as implicit output (`|`) on this
+    /// node and as order-only dep (`||`) on each child.
+    pub dependants: Vec<(FlagsTree, PathBuf)>,
 }
