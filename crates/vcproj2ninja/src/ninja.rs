@@ -41,7 +41,7 @@ impl NinjaFile {
         let output_file = match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
-                write_final(&mut out, "lib_link", flags, &rsp_path, &self.proj_dir).unwrap();
+                write_final(&mut out, "lib", flags, &rsp_path, &self.proj_dir).unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
@@ -86,7 +86,7 @@ fn write_rules(out: &mut impl FmtWrite) -> std::fmt::Result {
 rule cl
   command = cd /d "$proj_dir" && cl $flags
 
-rule lib_link
+rule lib
   command = cd /d "$proj_dir" && lib $flags && link $flags
 
 rule link
@@ -98,7 +98,7 @@ rule link
 rule cl
   command = cmd /c cd "$proj_dir" && cl $flags
 
-rule lib_link
+rule lib
   command = cmd /c cd "$proj_dir" && lib $flags && link $flags
 
 rule link
