@@ -51,8 +51,13 @@ impl NinjaBuildStatement {
         for o in &self.outputs {
             writeln!(out, "    {} $", ninja_escape(o))?;
         }
-        for o in &self.implicit_outputs {
-            writeln!(out, "    | {} $", ninja_escape(o))?;
+        // Implicit outputs: `|` appears once before the first item.
+        for (i, o) in self.implicit_outputs.iter().enumerate() {
+            if i == 0 {
+                writeln!(out, "    | {} $", ninja_escape(o))?;
+            } else {
+                writeln!(out, "      {} $", ninja_escape(o))?;
+            }
         }
 
         let has_inputs = !self.inputs.is_empty();
@@ -71,12 +76,14 @@ impl NinjaBuildStatement {
                     writeln!(out, "    {}", ninja_escape(inp))?;
                 }
             }
+            // Implicit inputs: `|` appears once before the first item.
             let last_implicit = self.implicit_inputs.len().saturating_sub(1);
             for (i, imp) in self.implicit_inputs.iter().enumerate() {
+                let prefix = if i == 0 { "    | " } else { "      " };
                 if i < last_implicit || has_oo {
-                    writeln!(out, "    | {} $", ninja_escape(imp))?;
+                    writeln!(out, "{}{} $", prefix, ninja_escape(imp))?;
                 } else {
-                    writeln!(out, "    | {}", ninja_escape(imp))?;
+                    writeln!(out, "{}{}", prefix, ninja_escape(imp))?;
                 }
             }
             if has_oo {
