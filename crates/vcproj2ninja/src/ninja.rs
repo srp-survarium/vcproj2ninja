@@ -39,19 +39,23 @@ impl NinjaFile {
             rsp_files.push((rsp_path, cl.rsp_file_content()));
         }
 
-        match &self.final_step {
+        let output_file = match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
                 write_final(&mut out, "lib_link", flags, &rsp_path, &self.proj_dir).unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
+                &flags.output_file
             }
 
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
                 write_final(&mut out, "link", flags, &rsp_path, &self.proj_dir).unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
+                &flags.output_file
             }
-        }
+        };
+
+        writeln!(out, "build {stem}: phony {}", ninja_path("", output_file)).unwrap();
 
         NinjaOutput {
             ninja_text: out,
