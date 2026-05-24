@@ -192,7 +192,7 @@ macro_rules! unimplemented_flag {
 impl LinkerTool {
     pub fn to_flags(
         &self,
-        vcproj_rpath: &str,
+        vcproj_sln_path: &str,
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
@@ -413,7 +413,7 @@ impl LinkerTool {
             .map(String::from),
         );
 
-        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
+        let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_sln_path, env);
 
         Flags {
             output_file: output_file.to_string(),

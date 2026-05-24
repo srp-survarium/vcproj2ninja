@@ -175,20 +175,15 @@ impl NinjaFile {
 
 /// Normalize an absolute path string (resolve `..`, no ninja escaping).
 fn normalize_path(path: &str) -> String {
-    Path::new(path)
-        .normalize_lexically()
-        .expect("path must be absolute")
-        .to_str()
-        .expect("path is valid UTF-8")
-        .to_string()
+    normalize_rpath("", path)
 }
 
-/// Join `dir` with a relative path and normalize the result.
-fn normalize_rpath(dir: &str, rel: &str) -> String {
-    Path::new(dir)
-        .join(rel)
+/// Join `base_dir` with a relative path and normalize the result.
+fn normalize_rpath(base_dir: &str, rel_path: &str) -> String {
+    Path::new(base_dir)
+        .join(rel_path)
         .normalize_lexically()
-        .expect("dir must be absolute")
+        .expect("base_dir must be absolute")
         .to_str()
         .expect("path is valid UTF-8")
         .to_string()
@@ -344,7 +339,11 @@ fn build_final_statement(
         outputs,
         implicit_outputs: vec![],
         rule,
-        inputs: flags.files.iter().map(|f| normalize_rpath(proj_dir, f)).collect(),
+        inputs: flags
+            .files
+            .iter()
+            .map(|f| normalize_rpath(proj_dir, f))
+            .collect(),
         implicit_inputs: depends_on.iter().map(|d| normalize_path(d)).collect(),
         order_only_deps: vec![],
         flags: Some(flag_str),
