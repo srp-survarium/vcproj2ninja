@@ -117,13 +117,25 @@ impl NinjaFile {
         let output_file = match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
-                statements.push(build_final_statement("lib", flags, &rsp_path, &self.depends_on));
+                statements.push(build_final_statement(
+                    "lib",
+                    flags,
+                    &rsp_path,
+                    &self.proj_dir,
+                    &self.depends_on,
+                ));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
-                statements.push(build_final_statement("link", flags, &rsp_path, &self.depends_on));
+                statements.push(build_final_statement(
+                    "link",
+                    flags,
+                    &rsp_path,
+                    &self.proj_dir,
+                    &self.depends_on,
+                ));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
@@ -299,11 +311,12 @@ fn build_final_statement(
     rule: &'static str,
     flags: &Flags,
     rsp_path: &Path,
+    proj_dir: &str,
     depends_on: &[String],
 ) -> NinjaBuildStatement {
-    let mut outputs = vec![flags.output_file.clone()];
+    let mut outputs = vec![normalize_path("", &flags.output_file)];
     if let Some(import_lib) = &flags.import_library {
-        outputs.push(import_lib.clone());
+        outputs.push(normalize_path("", import_lib));
     }
 
     let flag_str = flags
@@ -314,8 +327,8 @@ fn build_final_statement(
         outputs,
         implicit_outputs: vec![],
         rule,
-        inputs: flags.files.clone(),
-        implicit_inputs: depends_on.to_vec(),
+        inputs: flags.files.iter().map(|f| normalize_path(proj_dir, f)).collect(),
+        implicit_inputs: depends_on.iter().map(|d| normalize_path("", d)).collect(),
         order_only_deps: vec![],
         flags: Some(flag_str),
     }
