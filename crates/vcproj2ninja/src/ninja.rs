@@ -264,11 +264,11 @@ fn collect_cl_tree(
         let outputs: Vec<String> = flags
             .files
             .iter()
-            .map(|src| compute_obj(&flags.output_file, src))
+            .map(|src| normalize_path("", &compute_obj(&flags.output_file, src)))
             .collect();
 
         let implicit_outputs: Vec<String> = pch_implicit_out
-            .map(|p| p.to_str().expect("pch path is UTF-8").to_string())
+            .map(|p| normalize_path("", p.to_str().expect("pch path is UTF-8")))
             .into_iter()
             .collect();
 
@@ -279,7 +279,7 @@ fn collect_cl_tree(
             .collect();
 
         let implicit_inputs: Vec<String> = depends_on_pch
-            .map(|p| p.to_str().expect("pch dep is UTF-8").to_string())
+            .map(|p| normalize_path("", p.to_str().expect("pch dep is UTF-8")))
             .into_iter()
             .collect();
 
