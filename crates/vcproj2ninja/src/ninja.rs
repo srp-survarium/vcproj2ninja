@@ -15,7 +15,7 @@ pub struct NinjaFile {
     pub final_step: FinalStep,
     /// Absolute path to the vcproj directory; commands cd here before running.
     pub proj_dir: String,
-    /// Output file paths of sln-level dependencies; emitted as order-only deps (`||`).
+    /// Output file paths of sln-level dependencies.
     pub depends_on: Vec<String>,
 }
 
@@ -26,63 +26,113 @@ pub struct NinjaOutput {
     pub rsp_files: Vec<(PathBuf, String)>,
 }
 
+/// A single ninja build statement. Paths are stored normalized but unescaped;
+/// `render` applies ninja syntax escaping.
+pub struct NinjaBuildStatement {
+    pub outputs: Vec<String>,
+    pub implicit_outputs: Vec<String>,
+    pub rule: &'static str,
+    pub inputs: Vec<String>,
+    pub order_only_deps: Vec<String>,
+    /// The `flags = ...` binding. `None` for rules that carry no flags (e.g. phony).
+    pub flags: Option<String>,
+}
+
+impl NinjaBuildStatement {
+    fn render(&self, out: &mut impl FmtWrite) -> std::fmt::Result {
+        if self.outputs.is_empty() {
+            return Ok(());
+        }
+
+        writeln!(out, "build $")?;
+        for o in &self.outputs {
+            writeln!(out, "    {} $", ninja_escape(o))?;
+        }
+        for o in &self.implicit_outputs {
+            writeln!(out, "    | {} $", ninja_escape(o))?;
+        }
+
+        let has_inputs = !self.inputs.is_empty();
+        let has_oo = !self.order_only_deps.is_empty();
+
+        if !has_inputs && !has_oo {
+            writeln!(out, "    : {}", self.rule)?;
+        } else {
+            writeln!(out, "    : {} $", self.rule)?;
+            let last = self.inputs.len().saturating_sub(1);
+            for (i, inp) in self.inputs.iter().enumerate() {
+                if i < last || has_oo {
+                    writeln!(out, "    {} $", ninja_escape(inp))?;
+                } else {
+                    writeln!(out, "    {}", ninja_escape(inp))?;
+                }
+            }
+            if has_oo {
+                write!(out, "    ||")?;
+                for dep in &self.order_only_deps {
+                    write!(out, " {}", ninja_escape(dep))?;
+                }
+                writeln!(out)?;
+            }
+        }
+
+        if let Some(flags) = &self.flags {
+            writeln!(out, "  flags = {flags}")?;
+        }
+        writeln!(out)
+    }
+}
+
 impl NinjaFile {
     pub fn write(&self, stem: &str, rsp_dir: &Path) -> NinjaOutput {
-        let mut out = String::new();
+        let mut statements: Vec<NinjaBuildStatement> = vec![];
         let mut rsp_files: Vec<(PathBuf, String)> = vec![];
-
-        writeln!(out, "proj_dir = {}", self.proj_dir).unwrap();
-        writeln!(out).unwrap();
-        write_rules(&mut out).unwrap();
 
         let mut counter = 0usize;
         for tree in &self.cl {
-            write_cl_tree(
-                &mut out,
+            collect_cl_tree(
                 tree,
                 rsp_dir,
                 stem,
                 &mut counter,
                 &self.proj_dir,
+                &mut statements,
                 &mut rsp_files,
                 None,
-            )
-            .unwrap();
+            );
         }
 
         let output_file = match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
-                write_final(
-                    &mut out,
-                    "lib",
-                    flags,
-                    &rsp_path,
-                    &self.proj_dir,
-                    &self.depends_on,
-                )
-                .unwrap();
+                statements.push(build_final_statement("lib", flags, &rsp_path, &self.depends_on));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
-
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
-                write_final(
-                    &mut out,
-                    "link",
-                    flags,
-                    &rsp_path,
-                    &self.proj_dir,
-                    &self.depends_on,
-                )
-                .unwrap();
+                statements.push(build_final_statement("link", flags, &rsp_path, &self.depends_on));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
         };
 
-        writeln!(out, "build {stem}: phony {}", ninja_path("", output_file)).unwrap();
+        statements.push(NinjaBuildStatement {
+            outputs: vec![stem.to_string()],
+            implicit_outputs: vec![],
+            rule: "phony",
+            inputs: vec![output_file.clone()],
+            order_only_deps: vec![],
+            flags: None,
+        });
+
+        let mut out = String::new();
+        writeln!(out, "proj_dir = {}", self.proj_dir).unwrap();
+        writeln!(out).unwrap();
+        write_rules(&mut out).unwrap();
+        for stmt in &statements {
+            stmt.render(&mut out).unwrap();
+        }
 
         NinjaOutput {
             ninja_text: out,
@@ -91,18 +141,20 @@ impl NinjaFile {
     }
 }
 
-/// Join `base` and `rel`, normalize away `.`/`..`, and escape for a ninja build statement.
-/// Pass `""` as `base` when `rel` is already an absolute path.
-fn ninja_path(dir_path: &str, file_rpath: &str) -> String {
-    let file_path = Path::new(dir_path)
-        .join(file_rpath)
+/// Normalize `dir/rel` into an absolute path string (no ninja escaping).
+fn normalize_path(dir: &str, rel: &str) -> String {
+    Path::new(dir)
+        .join(rel)
         .normalize_lexically()
-        .expect("dir_path to be absolute");
-
-    file_path
+        .expect("dir must be absolute when rel is relative")
         .to_str()
         .expect("path is valid UTF-8")
-        .replace('$', "$$")
+        .to_string()
+}
+
+/// Escape a path for use in a ninja build statement.
+fn ninja_escape(path: &str) -> String {
+    path.replace('$', "$$")
         .replace(' ', "$ ")
         .replace(':', "$:")
 }
@@ -159,148 +211,97 @@ fn compute_obj(output_file: &str, src: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_cl_tree(
-    out: &mut impl FmtWrite,
+fn collect_cl_tree(
     tree: &FlagsTree,
     rsp_dir: &Path,
     stem: &str,
     counter: &mut usize,
     proj_dir: &str,
+    statements: &mut Vec<NinjaBuildStatement>,
     rsp_files: &mut Vec<(PathBuf, String)>,
-    depends_on_dep: Option<&std::path::Path>,
-) -> std::fmt::Result {
+    depends_on_pch: Option<&Path>,
+) {
     let i = *counter;
     *counter += 1;
     let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
 
-    let implicit_out = tree.dependants.first().map(|(_, p)| p.as_path());
+    let flags = &tree.flags;
+    let pch_implicit_out = tree.dependants.first().map(|(_, p)| p.as_path());
 
-    write_cl_node(
-        out,
-        &tree.flags,
-        &rsp_path,
-        proj_dir,
-        implicit_out,
-        depends_on_dep,
-    )?;
-    rsp_files.push((rsp_path, tree.flags.rsp_file_content()));
+    if !flags.files.is_empty() {
+        let outputs: Vec<String> = flags
+            .files
+            .iter()
+            .map(|src| compute_obj(&flags.output_file, src))
+            .collect();
+
+        let implicit_outputs: Vec<String> = pch_implicit_out
+            .map(|p| p.to_str().expect("pch path is UTF-8").to_string())
+            .into_iter()
+            .collect();
+
+        let inputs: Vec<String> = flags
+            .files
+            .iter()
+            .map(|src| normalize_path(proj_dir, src))
+            .collect();
+
+        let order_only_deps: Vec<String> = depends_on_pch
+            .map(|p| p.to_str().expect("pch dep is UTF-8").to_string())
+            .into_iter()
+            .collect();
+
+        let flag_str = flags
+            .flags
+            .replace("$(RspFile)", rsp_path.to_str().unwrap());
+
+        statements.push(NinjaBuildStatement {
+            outputs,
+            implicit_outputs,
+            rule: "cl",
+            inputs,
+            order_only_deps,
+            flags: Some(flag_str),
+        });
+    }
+
+    rsp_files.push((rsp_path, flags.rsp_file_content()));
 
     for (dep_tree, pch_path) in &tree.dependants {
-        write_cl_tree(
-            out,
+        collect_cl_tree(
             dep_tree,
             rsp_dir,
             stem,
             counter,
             proj_dir,
+            statements,
             rsp_files,
             Some(pch_path),
-        )?;
+        );
     }
-
-    Ok(())
 }
 
-fn write_cl_node(
-    out: &mut impl FmtWrite,
+fn build_final_statement(
+    rule: &'static str,
     flags: &Flags,
     rsp_path: &Path,
-    proj_dir: &str,
-    implicit_out: Option<&std::path::Path>,
-    depends_on_dep: Option<&std::path::Path>,
-) -> std::fmt::Result {
-    let Flags {
-        output_file,
-        flags,
-        rsp_flags: _,
-        files,
-        import_library: _,
-    } = flags;
-
-    if files.is_empty() {
-        return Ok(());
-    }
-
-    writeln!(out, "build $")?;
-    for src in files {
-        writeln!(
-            out,
-            "    {} $",
-            ninja_path("", &compute_obj(output_file, src))
-        )?;
-    }
-    if let Some(p) = implicit_out {
-        writeln!(
-            out,
-            "    | {} $",
-            ninja_path("", p.to_str().expect("pch path is UTF-8"))
-        )?;
-    }
-
-    write!(out, "    : cl")?;
-    for src in files {
-        write!(out, " {}", ninja_path(proj_dir, src))?;
-    }
-    if let Some(dep) = depends_on_dep {
-        write!(
-            out,
-            " || {}",
-            ninja_path("", dep.to_str().expect("pch dep is UTF-8"))
-        )?;
-    }
-    writeln!(out)?;
-
-    let flags = flags.replace("$(RspFile)", rsp_path.to_str().unwrap());
-    writeln!(out, "  flags = {flags}")?;
-    writeln!(out)
-}
-
-fn write_final(
-    out: &mut impl FmtWrite,
-    rule: &str,
-    flags: &Flags,
-    rsp_path: &Path,
-    proj_dir: &str,
     depends_on: &[String],
-) -> std::fmt::Result {
-    let Flags {
-        output_file,
-        flags,
-        rsp_flags: _,
-        files,
-        import_library,
-    } = flags;
-
-    writeln!(out, "build $")?;
-    writeln!(out, "    {} $", ninja_path("", output_file))?;
-    if let Some(import_library) = import_library {
-        writeln!(out, "    {} $", ninja_path("", import_library))?;
+) -> NinjaBuildStatement {
+    let mut outputs = vec![flags.output_file.clone()];
+    if let Some(import_lib) = &flags.import_library {
+        outputs.push(import_lib.clone());
     }
 
-    let has_oo = !depends_on.is_empty();
+    let flag_str = flags
+        .flags
+        .replace("$(RspFile)", rsp_path.to_str().unwrap());
 
-    if files.is_empty() && !has_oo {
-        writeln!(out, "    : {rule}")?;
-    } else {
-        writeln!(out, "    : {rule} $")?;
-        let last_file = files.len().saturating_sub(1);
-        for (i, file) in files.iter().enumerate() {
-            if i < last_file || has_oo {
-                writeln!(out, "    {} $", ninja_path(proj_dir, file))?;
-            } else {
-                writeln!(out, "    {}", ninja_path(proj_dir, file))?;
-            }
-        }
-        if has_oo {
-            write!(out, "    ||")?;
-            for dep in depends_on {
-                write!(out, " {}", ninja_path("", dep))?;
-            }
-            writeln!(out)?;
-        }
+    NinjaBuildStatement {
+        outputs,
+        implicit_outputs: vec![],
+        rule,
+        inputs: flags.files.clone(),
+        order_only_deps: depends_on.to_vec(),
+        flags: Some(flag_str),
     }
-
-    let flags = flags.replace("$(RspFile)", rsp_path.to_str().unwrap());
-    writeln!(out, "  flags = {flags}")?;
-    writeln!(out)
 }
