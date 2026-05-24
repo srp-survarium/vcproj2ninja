@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use nom::{
+    Parser,
     bytes::complete::{tag, take_until, take_until1, take_while, take_while1},
     character::complete::{char, digit1},
     combinator::{map_res, opt},
     multi::many0,
     sequence::{preceded, terminated},
-    Parser,
 };
-use uuid::{uuid, Uuid};
+use uuid::{Uuid, uuid};
 
 const VS_SOLUTION_FOLDER: Uuid = uuid!("2150E333-8FDC-42A3-9474-1A3956D46DE8");
 const VS_CPP_PROJECT: Uuid = uuid!("8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942");

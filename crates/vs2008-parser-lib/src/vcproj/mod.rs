@@ -6,11 +6,12 @@ mod tool_lib;
 mod tool_linker;
 mod utils;
 
-use vs2008_parser_proc::{flag_enum, ParseXml};
+use vs2008_parser_proc::{ParseXml, flag_enum};
 
 use macros::{optparse, parse, parse_attrs};
 
 pub use env::MsBuildEnvironment;
+pub use flags::{ClGroup, Flags};
 pub use tool_cl::CompilerTool;
 pub use tool_lib::LibTool;
 pub use tool_linker::LinkerTool;

@@ -1,13 +1,13 @@
 use vs2008_parser_proc::{ParseXml, flag_enum};
 
-use super::flags::{Flags, append_flags};
+use super::flags::{ClGroup, Flags, append_flags};
 use super::macros::*;
 use super::{CharacterSet, ConfigurationType};
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, ParseXml, Eq, PartialEq, Hash, Clone, Default)]
 #[parse_xml(
@@ -307,18 +307,30 @@ impl CompilerTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> Vec<Flags> {
-        let mut result = vec![];
+    ) -> Vec<ClGroup> {
+        let mut result: Vec<ClGroup> = vec![];
+        let mut pch_path: Option<PathBuf> = None;
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
             .into_iter()
-            .map(|(k, v)| (self.clone().merge(k), v))
-            .collect::<HashMap<_, _>>()
+            .fold(
+                HashMap::<CompilerTool, Vec<&str>>::new(),
+                |mut map, (k, v)| {
+                    map.entry(self.clone().merge(k)).or_default().extend(v);
+                    map
+                },
+            )
             .into_iter()
             .collect::<Vec<_>>();
 
-        // "Yc" > "Yu"
-        tool_n_files.sort_by_key(|tool| std::cmp::Reverse(tool.0.use_precompiled_header));
+        // PCH creation (/Yc) must be compiled before everything else
+        tool_n_files.sort_by_key(|(tool, _)| {
+            if matches!(tool.use_precompiled_header, Some(UsePrecompiledHeader::_1)) {
+                0usize
+            } else {
+                1usize
+            }
+        });
 
         for (tool, files) in tool_n_files {
             let mut env = env;
@@ -326,23 +338,46 @@ impl CompilerTool {
                 let input_name = Path::new(&files[0])
                     .file_stem()
                     .map(|x| x.to_str().expect("Path was constructed from String"))
-                    .unwrap_or(files[0].as_str());
+                    .unwrap_or(files[0]);
 
                 env.input_name = input_name;
             } else {
                 env.input_name = "<poison>";
             }
 
-            let mut flags = tool.to_flags_impl(cfg, env);
-            flags.files = files;
+            let (mut flags, pch_output, fd_path) = tool.to_flags_impl(cfg, env);
+            flags.files = files.iter().map(|file| file.to_string()).collect();
 
-            result.push(flags);
+            let pch_input = if pch_output.is_none()
+                && matches!(
+                    tool.use_precompiled_header,
+                    Some(UsePrecompiledHeader::_2 | UsePrecompiledHeader::_3)
+                ) {
+                pch_path.clone()
+            } else {
+                None
+            };
+
+            if let Some(p) = &pch_output {
+                pch_path = Some(p.clone());
+            }
+
+            result.push(ClGroup {
+                flags,
+                pch_output,
+                pch_input,
+                fd_path,
+            });
         }
 
         result
     }
 
-    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> Flags {
+    pub fn to_flags_impl(
+        &self,
+        cfg: &Configuration,
+        env: MsBuildEnvironment,
+    ) -> (Flags, Option<PathBuf>, Option<String>) {
         let Self {
             additional_options,
             optimization,
@@ -507,11 +542,14 @@ impl CompilerTool {
             .iter()
             .filter(|s| !s.is_empty())
         {
-            let expanded = env.expand(include_directory.trim());
-            if !include_directory.starts_with('"') {
-                rsp_flags.push(format!("/I \"{expanded}\""));
+            let include_directory = env.expand(include_directory.trim());
+            let include_directory = include_directory.trim().trim_matches('"');
+
+            // TODO: This needs proper handling
+            if include_directory.ends_with('\\') {
+                rsp_flags.push(format!("/I \"{include_directory}\\\""));
             } else {
-                rsp_flags.push(format!("/I {expanded}"));
+                rsp_flags.push(format!("/I \"{include_directory}\""));
             }
         }
 
@@ -555,26 +593,28 @@ impl CompilerTool {
         );
 
         // /Fp"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vostok_fs-static-gold.pch"
-        if let Some(precompiled_header_file) = precompiled_header_file
+        let pch_output = if let Some(precompiled_header_file) = precompiled_header_file
             && !precompiled_header_file.is_empty()
         {
-            rsp_flags.push(format!("/Fp\"{}\"", env.expand(precompiled_header_file)));
-        }
+            let expanded = env.expand(precompiled_header_file);
+            rsp_flags.push(format!("/Fp\"{expanded}\""));
+            if matches!(use_precompiled_header, Some(UsePrecompiledHeader::_1)) {
+                Some(PathBuf::from(expanded))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
         let output_file = if !object_file.is_empty() {
+            let is_specific_obj = object_file.to_ascii_lowercase().ends_with(".obj");
             let object_file = env.expand(object_file);
 
-            // TODO: Incorrect because of two reasons.
-            // msbuild doesn't actually match on extension. It does it somehow differently:
-            // Fo"E:\Projects\vostok\sources\/../binaries/Win32/intermediates/Release (static)/lua.5.1.4\"
-            //
-            // Here extension would be .4, which is wrong :)
-            //
-            // Also / as an end counts, not just \.
             let mut fo_path = object_file.clone();
-            if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
-                fo_path.push('\\');
+            if !is_specific_obj && !fo_path.ends_with('/') {
+                fo_path = format!("{}\\\\", fo_path.trim_end_matches('\\'));
             }
             rsp_flags.push(format!("/Fo\"{fo_path}\""));
             object_file
@@ -583,12 +623,13 @@ impl CompilerTool {
         };
 
         // /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vc90.pdb"
-        if !program_data_base_file_name.is_empty() {
-            rsp_flags.push(format!(
-                "/Fd\"{}\"",
-                env.expand(program_data_base_file_name)
-            ));
-        }
+        let fd_path = if !program_data_base_file_name.is_empty() {
+            let fd_path = env.expand(program_data_base_file_name);
+            rsp_flags.push(format!("/Fd\"{fd_path}\""));
+            Some(fd_path)
+        } else {
+            None
+        };
 
         append_flags!(
             rsp_flags,
@@ -624,18 +665,23 @@ impl CompilerTool {
         {
             rsp_flags.push(additional_options.clone());
         }
-        Flags {
-            output_file: output_file,
-            flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
-            rsp_flags: rsp_flags.join(" "),
-            files: vec![],
-        }
+        (
+            Flags {
+                output_file,
+                import_library: None,
+                flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
+                rsp_flags: rsp_flags.join(" "),
+                files: vec![],
+            },
+            pch_output,
+            fd_path,
+        )
     }
 
-    fn parse_files(
-        files: &Files,
+    fn parse_files<'a>(
+        files: &'a Files,
         configuration_platform: &str,
-    ) -> HashMap<CompilerTool, Vec<String>> {
+    ) -> HashMap<CompilerTool, Vec<&'a str>> {
         let mut result = HashMap::new();
 
         for filter in &files.filters {
@@ -645,13 +691,19 @@ impl CompilerTool {
         for file in &files.files {
             Self::parse_file(&mut result, file, configuration_platform);
         }
+        for files in result.values_mut() {
+            // It is possible for the same file to repeat multiple times in `Files` tag.
+            // This can be seen in `render_engine_pc_dx11.vcproj` for `effect_editor_shader_complexity.cpp`.
+            let mut conflicts = HashSet::new();
+            files.retain(|file| conflicts.insert(*file));
+        }
 
         result
     }
 
-    fn parse_filter(
-        result: &mut HashMap<CompilerTool, Vec<String>>,
-        filter: &Filter,
+    fn parse_filter<'a>(
+        result: &mut HashMap<CompilerTool, Vec<&'a str>>,
+        filter: &'a Filter,
         configuration_platform: &str,
     ) {
         for filter in &filter.filters {
@@ -663,9 +715,9 @@ impl CompilerTool {
         }
     }
 
-    fn parse_file(
-        result: &mut HashMap<CompilerTool, Vec<String>>,
-        file: &File,
+    fn parse_file<'a>(
+        result: &mut HashMap<CompilerTool, Vec<&'a str>>,
+        file: &'a File,
         configuration_platform: &str,
     ) {
         for file in &file.files {
@@ -685,7 +737,7 @@ impl CompilerTool {
         // We are relying on it to always be set though
         let compile_as = match file_extension {
             Some(b"c") => CompileAs::_1,
-            Some(b"cpp") => CompileAs::_2,
+            Some(b"cpp" | b"cxx" | b"cc") => CompileAs::_2,
             Some(
                 b"h" | b"hpp" | b"ico" | b"rc" | b"bmp" | b"avi" | b"ampl" | b"txt" | b"inl"
                 | b"def",
@@ -715,6 +767,96 @@ impl CompilerTool {
         result
             .entry(cl_tool)
             .or_default()
-            .push(file.relative_path.clone());
+            .push(file.relative_path.as_str());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::vcproj::{MsBuildEnvironment, VCProject};
+
+    const PCH_VCPROJ: &str = r#"<?xml version="1.0" encoding="Windows-1252"?>
+<VisualStudioProject
+    ProjectType="Visual C++"
+    Version="9,00"
+    Name="myproject"
+    ProjectGUID="{00000000-0000-0000-0000-000000000001}"
+    RootNamespace="myproject"
+    TargetFrameworkVersion="196613"
+    >
+    <Platforms><Platform Name="Win32"/></Platforms>
+    <Configurations>
+        <Configuration
+            Name="Release|Win32"
+            OutputDirectory="C:\out"
+            IntermediateDirectory="C:\int\myproject"
+            ConfigurationType="4"
+            >
+            <Tool Name="VCCLCompilerTool"/>
+            <Tool Name="VCLibrarianTool" OutputFile="C:\out\myproject.lib"/>
+        </Configuration>
+    </Configurations>
+    <Files>
+        <File RelativePath=".\pch.cpp">
+            <FileConfiguration Name="Release|Win32">
+                <Tool Name="VCCLCompilerTool" UsePrecompiledHeader="1"/>
+            </FileConfiguration>
+        </File>
+        <File RelativePath=".\use_pch.cpp">
+            <FileConfiguration Name="Release|Win32">
+                <Tool Name="VCCLCompilerTool" UsePrecompiledHeader="2"/>
+            </FileConfiguration>
+        </File>
+        <File RelativePath=".\other.cpp"/>
+    </Files>
+</VisualStudioProject>"#;
+
+    #[test]
+    fn pch_yc_yu_and_independent_file_produce_three_groups() {
+        let vcproj = VCProject::parse_xml(PCH_VCPROJ).unwrap();
+        let cfg = &vcproj.configurations[0];
+        let env = MsBuildEnvironment::get(&vcproj.name, cfg, r"C:\solution\");
+        let cl = cfg.compiler_tool.as_ref().unwrap();
+
+        let groups = cl.to_flags(cfg, &vcproj, env);
+
+        // Yc group + Yu group + independent other.cpp = 3 groups.
+        assert_eq!(groups.len(), 3, "expected Yc, Yu, and independent groups");
+
+        // Sort puts Yc (/Yc = key 0) first.
+        let yc_group = &groups[0];
+        assert!(yc_group.flags.files.iter().any(|f| f.contains("pch.cpp")));
+        assert!(
+            yc_group.pch_output.is_some(),
+            "Yc group should have pch_output"
+        );
+        assert!(yc_group.pch_input.is_none());
+
+        // Yu group consumes the PCH.
+        let yu_group = &groups[1];
+        assert!(
+            yu_group
+                .flags
+                .files
+                .iter()
+                .any(|f| f.contains("use_pch.cpp"))
+        );
+        assert!(
+            yu_group.pch_input.is_some(),
+            "Yu group should have pch_input"
+        );
+        assert!(yu_group.pch_output.is_none());
+
+        // The non-PCH file is independent.
+        let other_group = &groups[2];
+        assert!(
+            other_group
+                .flags
+                .files
+                .iter()
+                .any(|f| f.contains("other.cpp"))
+        );
+        assert!(other_group.pch_input.is_none());
+        assert!(other_group.pch_output.is_none());
     }
 }

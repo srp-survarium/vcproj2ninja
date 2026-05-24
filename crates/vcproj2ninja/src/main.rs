@@ -1,13 +1,15 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![feature(os_string_truncate)]
+#![feature(os_string_truncate, normalize_lexically)]
 
-use std::path::Path;
+mod ninja;
+
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use clap::Parser;
+use uuid::Uuid;
 
-use vs2008_parser_lib::vcproj::{ConfigurationType, MsBuildEnvironment};
+use ninja::{FinalStep, NinjaFile};
+use vs2008_parser_lib::vcproj::{ConfigurationType, Flags, MsBuildEnvironment};
 use vs2008_parser_lib::{sln, vcproj};
 
 #[derive(clap::Parser)]
@@ -19,9 +21,17 @@ pub struct Cli {
     #[arg(long)]
     pub project_name: String,
 
-    /// Configuration to build project with
+    /// Configuration to build project with.
     #[arg(long)]
     pub configuration_platform: String,
+
+    /// Directory to write generated .ninja files into (cleared on each run).
+    #[arg(long, value_hint = clap::ValueHint::DirPath)]
+    pub output_dir: std::path::PathBuf,
+
+    /// Print flags for each tool invocation in greppable format.
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -29,8 +39,12 @@ fn main() -> anyhow::Result<()> {
         sln_path,
         project_name,
         configuration_platform,
+        output_dir,
+        verbose,
     } = Cli::parse();
-    let sln = std::fs::read_to_string(&sln_path)?;
+
+    let sln = std::fs::read_to_string(&sln_path)
+        .with_context(|| format!("Reading sln '{}'", sln_path.display()))?;
     let sln = match sln::Sln::parse(&sln) {
         Ok((_leftovers, sln)) => sln,
         Err(error) => anyhow::bail!("{error}"),
@@ -40,22 +54,20 @@ fn main() -> anyhow::Result<()> {
         .find_project_dependencies(&project_name)
         .context("Project is not found")?;
 
-    // println!("Found {} dependencies for '{}'", deps.len(), project_name);
-    // for dep in &deps {
-    //     println!("> {}", dep.name);
-    // }
-    // println!();
-
     let sln_root = sln_path
         .parent()
         .context("Sln path must have a parent")?
         .to_path_buf();
     let mut project_path = sln_root.clone();
 
-    let mut sln_root = sln_root.to_string_lossy().to_string(); // TODO
+    let mut sln_root = sln_root.to_string_lossy().to_string();
     sln_root.push('\\');
 
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
+
+    // Phase 1: collect all ninja files before touching the output directory.
+    let mut ninja_files: Vec<(Uuid, String, NinjaFile)> = vec![];
+    let mut guid_to_link_output: HashMap<Uuid, String> = HashMap::new();
 
     for dep in deps {
         project_path.as_mut_os_string().truncate(base_len);
@@ -64,8 +76,9 @@ fn main() -> anyhow::Result<()> {
             project_path.push(component);
         }
 
-        let vcproj = std::fs::read_to_string(&project_path)?;
-        let vcproj = vcproj::VCProject::parse_xml(&vcproj)
+        let vcproj_text = std::fs::read_to_string(&project_path)
+            .with_context(|| format!("Reading '{}' at '{}'", dep.name, project_path.display()))?;
+        let vcproj = vcproj::VCProject::parse_xml(&vcproj_text)
             .with_context(|| format!("Failed parsing '{}' at '{}'", dep.name, dep.path))?;
 
         let cfg_platform = sln
@@ -81,6 +94,10 @@ fn main() -> anyhow::Result<()> {
                 )
             })?;
 
+        if !cfg_platform.is_enabled {
+            continue;
+        }
+
         let build_cfg = vcproj
             .configurations
             .iter()
@@ -94,10 +111,6 @@ fn main() -> anyhow::Result<()> {
 
         let env = MsBuildEnvironment::get(&vcproj.name, build_cfg, &sln_root);
 
-        if !cfg_platform.is_enabled {
-            continue;
-        }
-
         let cl = build_cfg.compiler_tool.as_ref().with_context(|| {
             format!(
                 "Only xbox configurations do not have a compiler enabled: {}",
@@ -105,47 +118,223 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
 
-        let _flags_n_files = cl.to_flags(build_cfg, &vcproj, env);
-        // for (flag, files) in _flags_n_files {
-        //     println!("[{}]: {}", vcproj.name, flag);
-        //      println!("[{}] [{}]: {}", vcproj.name, build_cfg.name, flag);
-        //      for file in files {
-        //          println!("  {file}");
-        //      }
-        // }
+        let cl_flags = cl.to_flags(build_cfg, &vcproj, env);
 
-        match build_cfg.configuration_type {
+        let proj_dir = project_path
+            .parent()
+            .expect("vcproj path must have a parent")
+            .to_string_lossy()
+            .into_owned();
+
+        let final_step = match build_cfg.configuration_type {
             ConfigurationType::_4 => {
                 let lib_tool = build_cfg.lib_tool.as_ref().with_context(|| {
                     format!(
-                        "Failed to find lib tool for library configuration: {}",
+                        "Failed to find lib tool for static lib configuration: {}",
                         vcproj.name
                     )
                 })?;
-                let _flags = lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
-                println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, _flags);
+                FinalStep::Lib(lib_tool.to_flags(&dep.path, build_cfg, &vcproj, env))
             }
             ConfigurationType::_1 | ConfigurationType::_2 => {
                 let linker_tool = build_cfg.linker_tool.as_ref().with_context(|| {
                     format!(
-                        "Failed to find linker tool for library configuration: {}",
+                        "Failed to find linker tool for exe/dll configuration: {}",
                         vcproj.name
                     )
                 })?;
-                let _flags = linker_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
-                // println!("[{}] [{}]: {}\n", vcproj.name, build_cfg.name, _flags);
+
+                let link_flags = linker_tool.to_flags(&dep.path, build_cfg, &vcproj, env);
+
+                FinalStep::Link(link_flags)
             }
-            _ => (),
+            cfg_type => anyhow::bail!(
+                "Unsupported configuration type {:?} for '{}'",
+                cfg_type,
+                vcproj.name
+            ),
+        };
+
+        let link_output_file = match &final_step {
+            FinalStep::Link(Flags {
+                import_library: Some(import_library),
+                ..
+            }) => import_library.clone(),
+            FinalStep::Lib(flags) | FinalStep::Link(flags) => flags.output_file.clone(),
+        };
+        guid_to_link_output.insert(vcproj.guid, link_output_file);
+
+        ninja_files.push((
+            vcproj.guid,
+            dep.name.clone(),
+            NinjaFile {
+                cl: cl_flags,
+                final_step,
+                proj_dir,
+                depends_on: vec![],
+            },
+        ));
+    }
+
+    // Populate order-only deps and linker inputs from sln project dependencies.
+    //
+    // The authoritative source for which libs a project needs is the sln
+    // ProjectSection(ProjectDependencies), collected transitively.
+    //
+    // A more precise alternative would be to scan each project's source files and
+    // their transitively included headers (resolved via the /I include paths) for
+    // `#pragma comment(lib, "name.lib")` directives, then map the bare name to a
+    // full path. This avoids false positives from deps that don't actually
+    // contribute symbols, but requires a simplified C preprocessor (following
+    // #include chains without macro expansion or conditional evaluation). The COFF
+    // .drectve section approach is equivalent but doesn't work for LTCG anonymous
+    // objects, and `dumpbin /DIRECTIVES` also returns empty for them.
+    let sln_projects: HashMap<Uuid, &sln::Project> =
+        sln.projects.iter().map(|p| (p.uuid, p)).collect();
+    for (guid, _name, ninja_file) in &mut ninja_files {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(*guid);
+        collect_transitive_deps(
+            *guid,
+            &sln_projects,
+            &guid_to_link_output,
+            &mut visited,
+            &mut ninja_file.depends_on,
+        );
+
+        // For link steps, bake the dep lib paths directly into rsp_flags so
+        // link.exe sees them as explicit inputs.
+        if let FinalStep::Link(ref mut flags) = ninja_file.final_step {
+            for dep_path in &ninja_file.depends_on {
+                let path = std::path::Path::new(dep_path);
+                let Some(ext) = path.extension() else {
+                    continue;
+                };
+
+                let lib_path = match ext.as_encoded_bytes() {
+                    b"lib" => dep_path.clone(),
+                    _ => unimplemented!(
+                        "Linker dependencies can only be libraries, yet: {}",
+                        ext.to_string_lossy()
+                    ),
+                };
+                flags.rsp_flags.push(' ');
+                flags.rsp_flags.push_str(&lib_path);
+            }
         }
     }
+
+    if verbose {
+        for (_guid, name, ninja_file) in &ninja_files {
+            for group in &ninja_file.cl {
+                print_cl_flags(name, group);
+            }
+            match &ninja_file.final_step {
+                FinalStep::Lib(flags) => eprintln!("[lib][{name}]: {}", flags.rsp_flags),
+                FinalStep::Link(flags) => eprintln!("[linker][{name}]: {}", flags.rsp_flags),
+            }
+        }
+    }
+
+    // Phase 2: clear and recreate the output directory.
+    if output_dir.exists() {
+        std::fs::remove_dir_all(&output_dir)
+            .with_context(|| format!("Clearing output dir '{}'", output_dir.display()))?;
+    }
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("Creating output dir '{}'", output_dir.display()))?;
+
+    let rsp_dir = output_dir.join("rsp");
+    std::fs::create_dir_all(&rsp_dir)
+        .with_context(|| format!("Creating rsp dir '{}'", rsp_dir.display()))?;
+
+    // Phase 3: assign unique filenames and write.
+    let mut used: HashSet<String> = HashSet::new();
+    let mut subninja_names: Vec<String> = vec![];
+
+    for (_guid, base_name, ninja_file) in ninja_files {
+        let stem = unique_stem(&mut used, &base_name);
+        let output = ninja_file.write(&stem, &rsp_dir);
+
+        let ninja_path = output_dir.join(format!("{stem}.ninja"));
+        std::fs::write(&ninja_path, &output.ninja_text)
+            .with_context(|| format!("Failed to write '{}'", ninja_path.display()))?;
+
+        for (rsp_path, rsp_content) in output.rsp_files {
+            std::fs::write(&rsp_path, &rsp_content)
+                .with_context(|| format!("Failed to write '{}'", rsp_path.display()))?;
+        }
+
+        subninja_names.push(format!("{stem}.ninja"));
+    }
+
+    // Top-level build.ninja that includes all per-project files.
+    let mut top = String::new();
+    for name in &subninja_names {
+        top.push_str(&format!("subninja {name}\n"));
+    }
+    let top_path = output_dir.join("build.ninja");
+    std::fs::write(&top_path, &top)
+        .with_context(|| format!("Failed to write '{}'", top_path.display()))?;
+
+    println!(
+        "Wrote {} project file(s) to '{}'",
+        subninja_names.len(),
+        output_dir.display()
+    );
 
     Ok(())
 }
 
-fn skip_nones(object: impl std::fmt::Debug) -> String {
-    format!("{object:#?}")
-        .lines()
-        .filter(|line| !line.contains("None"))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn print_cl_flags(name: &str, group: &vs2008_parser_lib::vcproj::ClGroup) {
+    eprintln!("[cl][{name}]: {}", group.flags.rsp_flags);
+}
+
+fn collect_transitive_deps(
+    guid: Uuid,
+    sln_projects: &HashMap<Uuid, &sln::Project>,
+    guid_to_link_output: &HashMap<Uuid, String>,
+    visited: &mut std::collections::HashSet<Uuid>,
+    result: &mut Vec<String>,
+) {
+    let Some(sln_proj) = sln_projects.get(&guid) else {
+        return;
+    };
+    let Some(section_deps) = &sln_proj.section_dependencies else {
+        return;
+    };
+
+    for dep in &section_deps.deps {
+        if !visited.insert(dep.uuid) {
+            continue;
+        }
+        if let Some(output) = guid_to_link_output.get(&dep.uuid) {
+            result.push(output.clone());
+        }
+        collect_transitive_deps(dep.uuid, sln_projects, guid_to_link_output, visited, result);
+    }
+}
+
+fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
+    let base: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }

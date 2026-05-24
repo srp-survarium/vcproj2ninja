@@ -87,8 +87,9 @@ impl LibTool {
 
         Flags {
             output_file: output_file.to_string(),
+            import_library: None,
             flags: "@$(RspFile) /NOLOGO".to_string(),
-            rsp_flags: rsp_flags.join("\n"),
+            rsp_flags: rsp_flags.join(" "),
             files,
         }
     }
@@ -111,26 +112,52 @@ impl LibTool {
         };
         let int_dir = PathBuf::from(env.expand(env.int_dir));
 
-        let source_files = Self::parse_files(files, configuration_platform)
-            .into_iter()
-            .map(|source_file| Path::new(source_file).file_name().unwrap());
-        Self::check_no_conflicts(source_files.clone());
+        let source_files = Self::parse_files(files, configuration_platform);
+        Self::check_no_conflicts(
+            source_files
+                .iter()
+                .map(|(p, _)| Path::new(p).file_name().unwrap()),
+        );
 
         let mut int_rpath = pathdiff(&vcproj_dir, &int_dir);
         let base_len = int_rpath.as_os_str().as_encoded_bytes().len();
 
         let mut result = vec![];
-        for source_file in source_files {
-            int_rpath.as_mut_os_string().truncate(base_len);
+        for (source_path, obj_override) in source_files {
+            let mut env = env;
+            env.input_name = Path::new(source_path)
+                .file_stem()
+                .map(|x| x.to_str().expect("Path was constructed from String"))
+                .expect("source_path cannot be an empty path");
 
-            int_rpath.push(source_file);
+            let obj_override = obj_override.map(|obj_override| {
+                let obj_override = env.expand(obj_override);
+                let obj_override = obj_override.trim().trim_matches('"').to_string();
+                assert_eq!(
+                    Path::new(&obj_override).extension(),
+                    Some(OsStr::new("obj"))
+                );
+
+                obj_override
+            });
+
+            let source_path = match &obj_override {
+                None => source_path,
+                Some(obj_override) => obj_override.as_str(),
+            };
+            let file_name = Path::new(source_path).file_stem().unwrap();
+            int_rpath.as_mut_os_string().truncate(base_len);
+            int_rpath.push(file_name);
             int_rpath.set_extension("obj");
-            result.push(format!("\"{}\"", int_rpath.to_str().unwrap()));
+            result.push(int_rpath.to_str().unwrap().to_string());
         }
         result
     }
 
-    pub fn parse_files<'a>(files: &'a Files, configuration_platform: &str) -> Vec<&'a str> {
+    pub fn parse_files<'a>(
+        files: &'a Files,
+        configuration_platform: &str,
+    ) -> Vec<(&'a str, Option<&'a str>)> {
         let mut result = vec![];
 
         for filter in &files.filters {
@@ -144,7 +171,7 @@ impl LibTool {
         // It is possible for the same file to repeat multiple times in `Files` tag.
         // This can be seen in `render_engine_pc_dx11.vcproj` for `effect_editor_shader_complexity.cpp`.
         let mut conflicts = HashSet::new();
-        result.retain(|file| conflicts.insert(*file));
+        result.retain(|(file, _)| conflicts.insert(*file));
 
         result
     }
@@ -173,7 +200,7 @@ impl LibTool {
     }
 
     fn parse_filter<'a>(
-        result: &mut Vec<&'a str>,
+        result: &mut Vec<(&'a str, Option<&'a str>)>,
         filter: &'a Filter,
         configuration_platform: &str,
     ) {
@@ -186,7 +213,11 @@ impl LibTool {
         }
     }
 
-    fn parse_file<'a>(result: &mut Vec<&'a str>, file: &'a File, configuration_platform: &str) {
+    fn parse_file<'a>(
+        result: &mut Vec<(&'a str, Option<&'a str>)>,
+        file: &'a File,
+        configuration_platform: &str,
+    ) {
         for file in &file.files {
             Self::parse_file(result, file, configuration_platform);
         }
@@ -206,11 +237,14 @@ impl LibTool {
             .filter(|config| config.name == configuration_platform)
             .find(|config| config.tool.is_some());
 
-        match config {
-            Some(config) if config.excluded_from_build == Some(true) => return,
-            _ => (),
+        if matches!(config, Some(config) if config.excluded_from_build == Some(true)) {
+            return;
         }
 
-        result.push(&file.relative_path);
+        let obj_override = config
+            .and_then(|c| c.tool.as_ref())
+            .and_then(|t| t.object_file.as_deref());
+
+        result.push((&file.relative_path, obj_override));
     }
 }
