@@ -513,11 +513,14 @@ impl CompilerTool {
             .iter()
             .filter(|s| !s.is_empty())
         {
-            let expanded = env.expand(include_directory.trim());
-            if !include_directory.starts_with('"') {
-                rsp_flags.push(format!("/I \"{expanded}\""));
+            let include_directory = env.expand(include_directory.trim());
+            let include_directory = include_directory.trim().trim_matches('"');
+
+            // TODO: This needs proper handling
+            if include_directory.ends_with('\\') {
+                rsp_flags.push(format!("/I \"{include_directory}\\\""));
             } else {
-                rsp_flags.push(format!("/I {expanded}"));
+                rsp_flags.push(format!("/I \"{include_directory}\""));
             }
         }
 
@@ -578,8 +581,10 @@ impl CompilerTool {
             // Here extension would be .4, which is wrong :)
             //
             // Also / as an end counts, not just \.
+            // TODO: This needs proper handling
             let mut fo_path = object_file.clone();
             if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
+                fo_path.push('\\');
                 fo_path.push('\\');
             }
             rsp_flags.push(format!("/Fo\"{fo_path}\""));
@@ -697,7 +702,7 @@ impl CompilerTool {
         // We are relying on it to always be set though
         let compile_as = match file_extension {
             Some(b"c") => CompileAs::_1,
-            Some(b"cpp") => CompileAs::_2,
+            Some(b"cpp" | b"cxx" | b"cc") => CompileAs::_2,
             Some(
                 b"h" | b"hpp" | b"ico" | b"rc" | b"bmp" | b"avi" | b"ampl" | b"txt" | b"inl"
                 | b"def",

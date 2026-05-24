@@ -36,19 +36,20 @@ impl NinjaFile {
         for (i, cl) in self.cl.iter().enumerate() {
             let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
             write_cl(&mut out, cl, &rsp_path, &self.proj_dir).unwrap();
-            rsp_files.push((rsp_path, rsp_file_content(cl)));
+            rsp_files.push((rsp_path, cl.rsp_file_content()));
         }
 
         match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
                 write_final(&mut out, "lib_link", flags, &rsp_path, &self.proj_dir).unwrap();
-                rsp_files.push((rsp_path, rsp_file_content(flags)));
+                rsp_files.push((rsp_path, flags.rsp_file_content()));
             }
+
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
                 write_final(&mut out, "link", flags, &rsp_path, &self.proj_dir).unwrap();
-                rsp_files.push((rsp_path, rsp_file_content(flags)));
+                rsp_files.push((rsp_path, flags.rsp_file_content()));
             }
         }
 
@@ -61,12 +62,13 @@ impl NinjaFile {
 
 /// Join `base` and `rel`, normalize away `.`/`..`, and escape for a ninja build statement.
 /// Pass `""` as `base` when `rel` is already an absolute path.
-fn ninja_path(base: &str, rel: &str) -> String {
-    let normalized = Path::new(base)
-        .join(rel)
+fn ninja_path(dir_path: &str, file_rpath: &str) -> String {
+    let file_path = Path::new(dir_path)
+        .join(file_rpath)
         .normalize_lexically()
-        .expect("path normalization");
-    normalized
+        .expect("dir_path to be absolute");
+
+    file_path
         .to_str()
         .expect("path is valid UTF-8")
         .replace('$', "$$")
@@ -74,32 +76,34 @@ fn ninja_path(base: &str, rel: &str) -> String {
         .replace(':', "$:")
 }
 
-/// Build the rsp file content: rsp_flags on first line(s), then one filename per line.
-fn rsp_file_content(flags: &Flags) -> String {
-    let mut content = flags.rsp_flags.clone();
-    for file in &flags.files {
-        content.push('\n');
-        content.push('"');
-        content.push_str(file);
-        content.push('"');
-    }
-    content
-}
-
 fn write_rules(out: &mut impl FmtWrite) -> std::fmt::Result {
-    writeln!(out, "rule cl")?;
-    writeln!(out, "  command = cd /d \"$proj_dir\" && cl @$rsp")?;
-    writeln!(out)?;
-    writeln!(out, "rule lib_link")?;
-    writeln!(
-        out,
-        "  command = cd /d \"$proj_dir\" && lib @$rsp && link /LIB @$rsp"
-    )?;
-    writeln!(out)?;
-    writeln!(out, "rule link")?;
-    writeln!(out, "  command = cd /d \"$proj_dir\" && link @$rsp")?;
-    writeln!(out)?;
-    Ok(())
+    // @TODO: cd /d is a proper solution. On my system cd is overriden by zoxide.
+    // So we need to fix zoxide cd override first.
+    const _WRITE_RULES: &str = r#"
+rule cl
+  command = cd /d "$proj_dir" && cl $flags
+
+rule lib_link
+  command = cd /d "$proj_dir" && lib $flags && link $flags
+
+rule link
+  command = cd /d "$proj_dir" && link $flags
+
+"#;
+
+    const WRITE_RULES: &str = r#"
+rule cl
+  command = cmd /c cd "$proj_dir" && cl $flags
+
+rule lib_link
+  command = cmd /c cd "$proj_dir" && lib $flags && link $flags
+
+rule link
+  command = cmd /c cd "$proj_dir" && link $flags
+
+"#;
+
+    writeln!(out, "{}", WRITE_RULES)
 }
 
 fn write_cl(
@@ -108,30 +112,46 @@ fn write_cl(
     rsp_path: &Path,
     proj_dir: &str,
 ) -> std::fmt::Result {
-    if flags.files.is_empty() {
-        return Ok(());
-    }
+    let Flags {
+        output_file,
+        flags,
+        rsp_flags: _,
+        files,
+    } = flags;
 
     writeln!(out, "build $")?;
-    for src in &flags.files {
-        let obj = {
-            let out_file = &flags.output_file;
-            if Path::new(out_file).extension().is_some_and(|e| e.eq_ignore_ascii_case("obj")) {
-                out_file.clone()
+    for src in files {
+        let obj_file = {
+            if Path::new(output_file)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("obj"))
+            {
+                output_file.clone()
             } else {
-                let sep = if out_file.ends_with(['\\', '/']) { "" } else { "\\" };
-                let stem = Path::new(src).file_stem().expect("source has stem").to_str().expect("valid UTF-8");
-                format!("{out_file}{sep}{stem}.obj")
+                let sep = if output_file.ends_with(['\\', '/']) {
+                    ""
+                } else {
+                    "\\"
+                };
+                let stem = Path::new(src)
+                    .file_stem()
+                    .expect("source has stem")
+                    .to_str()
+                    .expect("valid UTF-8");
+                format!("{output_file}{sep}{stem}.obj")
             }
         };
-        writeln!(out, "    {} $", ninja_path("", &obj))?;
+        writeln!(out, "    {} $", ninja_path("", &obj_file))?;
     }
+
     write!(out, "    : cl")?;
-    for src in &flags.files {
+    for src in files {
         write!(out, " {}", ninja_path(proj_dir, src))?;
     }
     writeln!(out)?;
-    writeln!(out, "  rsp = {}", rsp_path.display())?;
+
+    let flags = flags.replace("$(RspFile)", rsp_path.to_str().unwrap());
+    writeln!(out, "  flags = {flags}")?;
     writeln!(out)
 }
 
@@ -142,21 +162,30 @@ fn write_final(
     rsp_path: &Path,
     proj_dir: &str,
 ) -> std::fmt::Result {
+    let Flags {
+        output_file,
+        flags,
+        rsp_flags: _,
+        files,
+    } = flags;
+
     writeln!(out, "build $")?;
-    writeln!(out, "    {} $", ninja_path("", &flags.output_file))?;
-    if flags.files.is_empty() {
+    writeln!(out, "    {} $", ninja_path("", output_file))?;
+    if files.is_empty() {
         writeln!(out, "    : {rule}")?;
     } else {
         writeln!(out, "    : {rule} $")?;
-        let last = flags.files.len() - 1;
-        for (i, f) in flags.files.iter().enumerate() {
+        let last = files.len() - 1;
+        for (i, file) in files.iter().enumerate() {
             if i < last {
-                writeln!(out, "    {} $", ninja_path(proj_dir, f))?;
+                writeln!(out, "    {} $", ninja_path(proj_dir, file))?;
             } else {
-                writeln!(out, "    {}", ninja_path(proj_dir, f))?;
+                writeln!(out, "    {}", ninja_path(proj_dir, file))?;
             }
         }
     }
-    writeln!(out, "  rsp = {}", rsp_path.display())?;
+
+    let flags = flags.replace("$(RspFile)", rsp_path.to_str().unwrap());
+    writeln!(out, "  flags = {flags}")?;
     writeln!(out)
 }

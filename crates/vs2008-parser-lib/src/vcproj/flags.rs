@@ -29,3 +29,17 @@ pub struct Flags {
     /// LIB/LINK: .obj paths from LibTool::file_flags.
     pub files: Vec<String>,
 }
+impl Flags {
+    /// Build the rsp file content: rsp_flags on first line(s), then one filename per line.
+    pub fn rsp_file_content(&self) -> String {
+        let mut content = self.rsp_flags.clone();
+        for file in &self.files {
+            content.push('\n');
+            content.push('"');
+            content.push_str(file);
+            content.push('"');
+        }
+
+        content
+    }
+}
