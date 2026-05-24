@@ -27,6 +27,10 @@ pub struct Cli {
     /// Directory to write generated .ninja files into (cleared on each run).
     #[arg(long, value_hint = clap::ValueHint::DirPath)]
     pub output_dir: std::path::PathBuf,
+
+    /// Print flags for each tool invocation in greppable format.
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,6 +39,7 @@ fn main() -> anyhow::Result<()> {
         project_name,
         configuration_platform,
         output_dir,
+        verbose,
     } = Cli::parse();
 
     let sln = std::fs::read_to_string(&sln_path)?;
@@ -156,6 +161,18 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
+    if verbose {
+        for (name, ninja_file) in &ninja_files {
+            for tree in &ninja_file.cl {
+                print_tree_flags("cl", name, tree);
+            }
+            match &ninja_file.final_step {
+                FinalStep::Lib(flags) => eprintln!("[lib][{name}]: {}", flags.rsp_flags),
+                FinalStep::Link(flags) => eprintln!("[linker][{name}]: {}", flags.rsp_flags),
+            }
+        }
+    }
+
     // Phase 2: clear and recreate the output directory.
     if output_dir.exists() {
         std::fs::remove_dir_all(&output_dir)?;
@@ -201,6 +218,13 @@ fn main() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+fn print_tree_flags(tool: &str, name: &str, tree: &vs2008_parser_lib::vcproj::FlagsTree) {
+    eprintln!("[{tool}][{name}]: {}", tree.flags.rsp_flags);
+    for (child, _) in &tree.dependants {
+        print_tree_flags(tool, name, child);
+    }
 }
 
 fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
