@@ -1,6 +1,6 @@
 use vs2008_parser_proc::{ParseXml, flag_enum};
 
-use super::flags::{Flags, FlagsTree, append_flags};
+use super::flags::{ClGroup, Flags, append_flags};
 use super::macros::*;
 use super::{CharacterSet, ConfigurationType};
 use super::{Configuration, File, Files, Filter, MsBuildEnvironment, VCProject};
@@ -307,9 +307,8 @@ impl CompilerTool {
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
-    ) -> Vec<FlagsTree> {
-        let mut result: Vec<FlagsTree> = vec![];
-        let mut pch_root_idx: Option<usize> = None;
+    ) -> Vec<ClGroup> {
+        let mut result: Vec<ClGroup> = vec![];
         let mut pch_path: Option<PathBuf> = None;
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
@@ -346,28 +345,29 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
-            let (mut flags, maybe_pch) = tool.to_flags_impl(cfg, env);
+            let (mut flags, pch_output, fd_path) = tool.to_flags_impl(cfg, env);
             flags.files = files.iter().map(|file| file.to_string()).collect();
 
-            let tree = FlagsTree {
-                flags,
-                dependants: vec![],
-            };
-
-            if let Some(p) = maybe_pch {
-                pch_root_idx = Some(result.len());
-                pch_path = Some(p);
-                result.push(tree);
-            } else if let (Some(idx), Some(p)) = (pch_root_idx, &pch_path)
+            let pch_input = if pch_output.is_none()
                 && matches!(
                     tool.use_precompiled_header,
                     Some(UsePrecompiledHeader::_2 | UsePrecompiledHeader::_3)
-                )
-            {
-                result[idx].dependants.push((tree, p.clone()));
+                ) {
+                pch_path.clone()
             } else {
-                result.push(tree);
+                None
+            };
+
+            if let Some(p) = &pch_output {
+                pch_path = Some(p.clone());
             }
+
+            result.push(ClGroup {
+                flags,
+                pch_output,
+                pch_input,
+                fd_path,
+            });
         }
 
         result
@@ -377,7 +377,7 @@ impl CompilerTool {
         &self,
         cfg: &Configuration,
         env: MsBuildEnvironment,
-    ) -> (Flags, Option<PathBuf>) {
+    ) -> (Flags, Option<PathBuf>, Option<String>) {
         let Self {
             additional_options,
             optimization,
@@ -623,12 +623,13 @@ impl CompilerTool {
         };
 
         // /Fd"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vc90.pdb"
-        if !program_data_base_file_name.is_empty() {
-            rsp_flags.push(format!(
-                "/Fd\"{}\"",
-                env.expand(program_data_base_file_name)
-            ));
-        }
+        let fd_path = if !program_data_base_file_name.is_empty() {
+            let fd_path = env.expand(program_data_base_file_name);
+            rsp_flags.push(format!("/Fd\"{fd_path}\""));
+            Some(fd_path)
+        } else {
+            None
+        };
 
         append_flags!(
             rsp_flags,
@@ -673,6 +674,7 @@ impl CompilerTool {
                 files: vec![],
             },
             pch_output,
+            fd_path,
         )
     }
 
@@ -810,44 +812,33 @@ mod tests {
 </VisualStudioProject>"#;
 
     #[test]
-    fn pch_yc_yu_and_independent_file_produce_chain_plus_sibling() {
+    fn pch_yc_yu_and_independent_file_produce_three_groups() {
         let vcproj = VCProject::parse_xml(PCH_VCPROJ).unwrap();
         let cfg = &vcproj.configurations[0];
         let env = MsBuildEnvironment::get(&vcproj.name, cfg, r"C:\solution\");
         let cl = cfg.compiler_tool.as_ref().unwrap();
 
-        let trees = cl.to_flags(cfg, &vcproj, env);
+        let groups = cl.to_flags(cfg, &vcproj, env);
 
-        // Yc root + independent other.cpp = 2 top-level trees.
-        assert_eq!(trees.len(), 2, "expected Yc root and independent sibling");
+        // Yc group + Yu group + independent other.cpp = 3 groups.
+        assert_eq!(groups.len(), 3, "expected Yc, Yu, and independent groups");
 
-        // Sort puts Yc (/Yc = key 0) first, so trees[0] is the Yc root.
-        let yc_root = &trees[0];
-        let sibling = &trees[1];
+        // Sort puts Yc (/Yc = key 0) first.
+        let yc_group = &groups[0];
+        assert!(yc_group.flags.files.iter().any(|f| f.contains("pch.cpp")));
+        assert!(yc_group.pch_output.is_some(), "Yc group should have pch_output");
+        assert!(yc_group.pch_input.is_none());
 
-        // Yc root has exactly one Yu dependant.
-        assert_eq!(
-            yc_root.dependants.len(),
-            1,
-            "Yc root should have one Yu dependant"
-        );
-        assert!(yc_root.flags.files.iter().any(|f| f.contains("pch.cpp")));
-
-        let (yu_tree, _pch_path) = &yc_root.dependants[0];
-        assert!(
-            yu_tree
-                .flags
-                .files
-                .iter()
-                .any(|f| f.contains("use_pch.cpp"))
-        );
-        assert!(yu_tree.dependants.is_empty());
+        // Yu group consumes the PCH.
+        let yu_group = &groups[1];
+        assert!(yu_group.flags.files.iter().any(|f| f.contains("use_pch.cpp")));
+        assert!(yu_group.pch_input.is_some(), "Yu group should have pch_input");
+        assert!(yu_group.pch_output.is_none());
 
         // The non-PCH file is independent.
-        assert!(
-            sibling.dependants.is_empty(),
-            "other.cpp should not be a PCH dependant"
-        );
-        assert!(sibling.flags.files.iter().any(|f| f.contains("other.cpp")));
+        let other_group = &groups[2];
+        assert!(other_group.flags.files.iter().any(|f| f.contains("other.cpp")));
+        assert!(other_group.pch_input.is_none());
+        assert!(other_group.pch_output.is_none());
     }
 }

@@ -50,10 +50,14 @@ impl Flags {
     }
 }
 
-pub struct FlagsTree {
+pub struct ClGroup {
     pub flags: Flags,
-    /// Children that depend on an artifact this node produces (e.g. a .pch file).
-    /// The `PathBuf` is the artifact path: listed as implicit output (`|`) on this
-    /// node and as order-only dep (`||`) on each child.
-    pub dependants: Vec<(FlagsTree, PathBuf)>,
+    /// PCH file this step creates (`/Yc`); listed as implicit output.
+    pub pch_output: Option<PathBuf>,
+    /// PCH file this step consumes (`/Yu`); listed as implicit input.
+    pub pch_input: Option<PathBuf>,
+    /// Expanded `/Fd` path shared by all cl steps in the project.
+    /// Used as the ninja pool key to prevent parallel PDB writes.
+    /// `None` when the project does not write a PDB (no `/Fd` flag).
+    pub fd_path: Option<String>,
 }

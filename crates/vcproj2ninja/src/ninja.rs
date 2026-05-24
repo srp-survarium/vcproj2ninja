@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 
-use vs2008_parser_lib::vcproj::{Flags, FlagsTree};
+use vs2008_parser_lib::vcproj::{ClGroup, Flags};
 
 pub enum FinalStep {
     /// Static lib: lib then link /LIB, both sharing the same rsp.
@@ -11,7 +11,7 @@ pub enum FinalStep {
 }
 
 pub struct NinjaFile {
-    pub cl: Vec<FlagsTree>,
+    pub cl: Vec<ClGroup>,
     pub final_step: FinalStep,
     /// Absolute path to the vcproj directory; commands cd here before running.
     pub proj_dir: String,
@@ -39,6 +39,8 @@ pub struct NinjaBuildStatement {
     pub order_only_deps: Vec<String>,
     /// The `flags = ...` binding. `None` for rules that carry no flags (e.g. phony).
     pub flags: Option<String>,
+    /// Ninja pool name. Steps in the same pool with `depth = 1` never run in parallel.
+    pub pool: Option<String>,
 }
 
 impl NinjaBuildStatement {
@@ -98,6 +100,9 @@ impl NinjaBuildStatement {
         if let Some(flags) = &self.flags {
             writeln!(out, "  flags = {flags}")?;
         }
+        if let Some(pool) = &self.pool {
+            writeln!(out, "  pool = {pool}")?;
+        }
         writeln!(out)
     }
 }
@@ -107,18 +112,56 @@ impl NinjaFile {
         let mut statements: Vec<NinjaBuildStatement> = vec![];
         let mut rsp_files: Vec<(PathBuf, String)> = vec![];
 
-        let mut counter = 0usize;
-        for tree in &self.cl {
-            collect_cl_tree(
-                tree,
-                rsp_dir,
-                stem,
-                &mut counter,
-                &self.proj_dir,
-                &mut statements,
-                &mut rsp_files,
-                None,
-            );
+        for (i, group) in self.cl.iter().enumerate() {
+            let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
+            let flags = &group.flags;
+
+            if !flags.files.is_empty() {
+                let outputs: Vec<String> = flags
+                    .files
+                    .iter()
+                    .map(|src| normalize_path(&compute_obj(&flags.output_file, src)))
+                    .collect();
+
+                let implicit_outputs: Vec<String> = group
+                    .pch_output
+                    .as_deref()
+                    .map(|p| normalize_path(p.to_str().expect("pch path is UTF-8")))
+                    .into_iter()
+                    .collect();
+
+                let inputs: Vec<String> = flags
+                    .files
+                    .iter()
+                    .map(|src| normalize_rpath(&self.proj_dir, src))
+                    .collect();
+
+                let implicit_inputs: Vec<String> = group
+                    .pch_input
+                    .as_deref()
+                    .map(|p| normalize_path(p.to_str().expect("pch dep is UTF-8")))
+                    .into_iter()
+                    .collect();
+
+                let flag_str = flags
+                    .flags
+                    .replace("$(RspFile)", rsp_path.to_str().unwrap());
+
+                let pool = group.fd_path.as_deref().map(fd_pool_name);
+
+                statements.push(NinjaBuildStatement {
+                    outputs,
+                    implicit_outputs,
+                    rule: "cl",
+                    inputs,
+                    implicit_inputs,
+                    order_only_deps: vec![],
+                    flags: Some(flag_str),
+                    pool,
+                });
+            }
+
+            rsp_files.push((rsp_path, flags.rsp_file_content()));
         }
 
         let output_file = match &self.final_step {
@@ -156,11 +199,26 @@ impl NinjaFile {
             implicit_inputs: vec![],
             order_only_deps: vec![],
             flags: None,
+            pool: None,
         });
 
         let mut out = String::new();
         writeln!(out, "proj_dir = {}", self.proj_dir).unwrap();
         writeln!(out).unwrap();
+
+        // Declare one pool per unique /Fd path so parallel cl steps don't race on the PDB.
+        let mut seen_pools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for group in &self.cl {
+            if let Some(fd_path) = &group.fd_path {
+                let name = fd_pool_name(fd_path);
+                if seen_pools.insert(name.clone()) {
+                    writeln!(out, "pool {name}").unwrap();
+                    writeln!(out, "  depth = 1").unwrap();
+                    writeln!(out).unwrap();
+                }
+            }
+        }
+
         write_rules(&mut out).unwrap();
         for stmt in &statements {
             stmt.render(&mut out).unwrap();
@@ -247,76 +305,11 @@ fn compute_obj(output_file: &str, src: &str) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn collect_cl_tree(
-    tree: &FlagsTree,
-    rsp_dir: &Path,
-    stem: &str,
-    counter: &mut usize,
-    proj_dir: &str,
-    statements: &mut Vec<NinjaBuildStatement>,
-    rsp_files: &mut Vec<(PathBuf, String)>,
-    depends_on_pch: Option<&Path>,
-) {
-    let i = *counter;
-    *counter += 1;
-    let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
-
-    let flags = &tree.flags;
-    let pch_implicit_out = tree.dependants.first().map(|(_, p)| p.as_path());
-
-    if !flags.files.is_empty() {
-        let outputs: Vec<String> = flags
-            .files
-            .iter()
-            .map(|src| normalize_path(&compute_obj(&flags.output_file, src)))
-            .collect();
-
-        let implicit_outputs: Vec<String> = pch_implicit_out
-            .map(|p| normalize_path(p.to_str().expect("pch path is UTF-8")))
-            .into_iter()
-            .collect();
-
-        let inputs: Vec<String> = flags
-            .files
-            .iter()
-            .map(|src| normalize_rpath(proj_dir, src))
-            .collect();
-
-        let implicit_inputs: Vec<String> = depends_on_pch
-            .map(|p| normalize_path(p.to_str().expect("pch dep is UTF-8")))
-            .into_iter()
-            .collect();
-
-        let flag_str = flags
-            .flags
-            .replace("$(RspFile)", rsp_path.to_str().unwrap());
-
-        statements.push(NinjaBuildStatement {
-            outputs,
-            implicit_outputs,
-            rule: "cl",
-            inputs,
-            implicit_inputs,
-            order_only_deps: vec![],
-            flags: Some(flag_str),
-        });
-    }
-
-    rsp_files.push((rsp_path, flags.rsp_file_content()));
-
-    for (dep_tree, pch_path) in &tree.dependants {
-        collect_cl_tree(
-            dep_tree,
-            rsp_dir,
-            stem,
-            counter,
-            proj_dir,
-            statements,
-            rsp_files,
-            Some(pch_path),
-        );
-    }
+fn fd_pool_name(fd_path: &str) -> String {
+    fd_path
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 fn build_final_statement(
@@ -347,5 +340,6 @@ fn build_final_statement(
         implicit_inputs: depends_on.iter().map(|d| normalize_path(d)).collect(),
         order_only_deps: vec![],
         flags: Some(flag_str),
+        pool: None,
     }
 }

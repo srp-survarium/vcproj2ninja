@@ -226,8 +226,8 @@ fn main() -> anyhow::Result<()> {
 
     if verbose {
         for (_guid, name, ninja_file) in &ninja_files {
-            for tree in &ninja_file.cl {
-                print_tree_flags("cl", name, tree);
+            for group in &ninja_file.cl {
+                print_cl_flags(name, group);
             }
             match &ninja_file.final_step {
                 FinalStep::Lib(flags) => eprintln!("[lib][{name}]: {}", flags.rsp_flags),
@@ -286,11 +286,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_tree_flags(tool: &str, name: &str, tree: &vs2008_parser_lib::vcproj::FlagsTree) {
-    eprintln!("[{tool}][{name}]: {}", tree.flags.rsp_flags);
-    for (child, _) in &tree.dependants {
-        print_tree_flags(tool, name, child);
-    }
+fn print_cl_flags(name: &str, group: &vs2008_parser_lib::vcproj::ClGroup) {
+    eprintln!("[cl][{name}]: {}", group.flags.rsp_flags);
 }
 
 fn collect_transitive_deps(
