@@ -178,12 +178,12 @@ fn normalize_path(path: &str) -> String {
     normalize_rpath("", path)
 }
 
-/// Join `base_dir` with a relative path and normalize the result.
-fn normalize_rpath(base_dir: &str, rel_path: &str) -> String {
-    Path::new(base_dir)
-        .join(rel_path)
+/// Join `base_path` with a relative path and normalize the result.
+fn normalize_rpath(base_path: &str, rpath: &str) -> String {
+    Path::new(base_path)
+        .join(rpath)
         .normalize_lexically()
-        .expect("base_dir must be absolute")
+        .expect("base_path must be absolute")
         .to_str()
         .expect("path is valid UTF-8")
         .to_string()
