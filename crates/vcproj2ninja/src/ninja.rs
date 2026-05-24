@@ -173,12 +173,22 @@ impl NinjaFile {
     }
 }
 
-/// Normalize `dir/rel` into an absolute path string (no ninja escaping).
-fn normalize_path(dir: &str, rel: &str) -> String {
+/// Normalize an absolute path string (resolve `..`, no ninja escaping).
+fn normalize_path(path: &str) -> String {
+    Path::new(path)
+        .normalize_lexically()
+        .expect("path must be absolute")
+        .to_str()
+        .expect("path is valid UTF-8")
+        .to_string()
+}
+
+/// Join `dir` with a relative path and normalize the result.
+fn normalize_rpath(dir: &str, rel: &str) -> String {
     Path::new(dir)
         .join(rel)
         .normalize_lexically()
-        .expect("dir must be absolute when rel is relative")
+        .expect("dir must be absolute")
         .to_str()
         .expect("path is valid UTF-8")
         .to_string()
@@ -264,22 +274,22 @@ fn collect_cl_tree(
         let outputs: Vec<String> = flags
             .files
             .iter()
-            .map(|src| normalize_path("", &compute_obj(&flags.output_file, src)))
+            .map(|src| normalize_path(&compute_obj(&flags.output_file, src)))
             .collect();
 
         let implicit_outputs: Vec<String> = pch_implicit_out
-            .map(|p| normalize_path("", p.to_str().expect("pch path is UTF-8")))
+            .map(|p| normalize_path(p.to_str().expect("pch path is UTF-8")))
             .into_iter()
             .collect();
 
         let inputs: Vec<String> = flags
             .files
             .iter()
-            .map(|src| normalize_path(proj_dir, src))
+            .map(|src| normalize_rpath(proj_dir, src))
             .collect();
 
         let implicit_inputs: Vec<String> = depends_on_pch
-            .map(|p| normalize_path("", p.to_str().expect("pch dep is UTF-8")))
+            .map(|p| normalize_path(p.to_str().expect("pch dep is UTF-8")))
             .into_iter()
             .collect();
 
@@ -321,9 +331,9 @@ fn build_final_statement(
     proj_dir: &str,
     depends_on: &[String],
 ) -> NinjaBuildStatement {
-    let mut outputs = vec![normalize_path("", &flags.output_file)];
+    let mut outputs = vec![normalize_path(&flags.output_file)];
     if let Some(import_lib) = &flags.import_library {
-        outputs.push(normalize_path("", import_lib));
+        outputs.push(normalize_path(import_lib));
     }
 
     let flag_str = flags
@@ -334,8 +344,8 @@ fn build_final_statement(
         outputs,
         implicit_outputs: vec![],
         rule,
-        inputs: flags.files.iter().map(|f| normalize_path(proj_dir, f)).collect(),
-        implicit_inputs: depends_on.iter().map(|d| normalize_path("", d)).collect(),
+        inputs: flags.files.iter().map(|f| normalize_rpath(proj_dir, f)).collect(),
+        implicit_inputs: depends_on.iter().map(|d| normalize_path(d)).collect(),
         order_only_deps: vec![],
         flags: Some(flag_str),
     }
