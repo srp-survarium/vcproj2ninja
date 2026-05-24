@@ -87,7 +87,7 @@ rule cl
   command = cd /d "$proj_dir" && cl $flags
 
 rule lib
-  command = cd /d "$proj_dir" && lib $flags && link $flags
+  command = cd /d "$proj_dir" && lib $flags
 
 rule link
   command = cd /d "$proj_dir" && link $flags
@@ -99,7 +99,7 @@ rule cl
   command = cmd /c cd "$proj_dir" && cl $flags
 
 rule lib
-  command = cmd /c cd "$proj_dir" && lib $flags && link $flags
+  command = cmd /c cd "$proj_dir" && lib $flags
 
 rule link
   command = cmd /c cd "$proj_dir" && link $flags
