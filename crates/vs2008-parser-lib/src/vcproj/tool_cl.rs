@@ -314,8 +314,10 @@ impl CompilerTool {
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
             .into_iter()
-            .map(|(k, v)| (self.clone().merge(k), v))
-            .collect::<HashMap<_, _>>()
+            .fold(HashMap::<CompilerTool, Vec<&str>>::new(), |mut map, (k, v)| {
+                map.entry(self.clone().merge(k)).or_default().extend(v);
+                map
+            })
             .into_iter()
             .collect::<Vec<_>>();
 
