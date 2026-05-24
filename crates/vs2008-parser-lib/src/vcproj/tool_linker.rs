@@ -1,9 +1,9 @@
-use vs2008_parser_proc::{ParseXml, flag_enum};
+use vs2008_parser_proc::{flag_enum, ParseXml};
 
-use super::ConfigurationType;
-use super::flags::{Flags, append_flags};
+use super::flags::{append_flags, Flags};
 use super::macros::*;
 use super::utils;
+use super::ConfigurationType;
 use super::{Configuration, LibTool, MsBuildEnvironment, VCProject};
 
 use std::path::Path;
@@ -377,7 +377,16 @@ impl LinkerTool {
             }
         }
 
-        append_flags!(rsp_flags, [additional_options, additional_dependencies]);
+        append_flags!(rsp_flags, [additional_options]);
+
+        for dep in additional_dependencies.iter().flat_map(|s| parse_deps(s)) {
+            let dep = env.expand(&dep);
+            if dep.contains(' ') {
+                rsp_flags.push(format!("\"{dep}\""));
+            } else {
+                rsp_flags.push(dep);
+            }
+        }
 
         let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
@@ -388,4 +397,26 @@ impl LinkerTool {
             files,
         }
     }
+}
+
+/// Split `AdditionalDependencies` into individual lib entries.
+/// Items are space-separated; a quoted item `"path with spaces.lib"` is treated as one token.
+fn parse_deps(s: &str) -> Vec<&str> {
+    use nom::{
+        branch::alt,
+        bytes::complete::{tag, take_till1, take_until},
+        character::complete::multispace0,
+        error::Error,
+        multi::many0,
+        sequence::{delimited, preceded},
+        Parser,
+    };
+
+    const QUOTE: &str = "\"";
+    let quoted = delimited(tag(QUOTE), take_until(QUOTE), tag(QUOTE));
+    let unquoted = take_till1(char::is_whitespace);
+    let dep = preceded(multispace0, alt((quoted, unquoted)));
+
+    let result: Result<_, nom::Err<Error<&str>>> = many0(dep).parse(s);
+    result.unwrap_or_default().1
 }
