@@ -314,10 +314,13 @@ impl CompilerTool {
 
         let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
             .into_iter()
-            .fold(HashMap::<CompilerTool, Vec<&str>>::new(), |mut map, (k, v)| {
-                map.entry(self.clone().merge(k)).or_default().extend(v);
-                map
-            })
+            .fold(
+                HashMap::<CompilerTool, Vec<&str>>::new(),
+                |mut map, (k, v)| {
+                    map.entry(self.clone().merge(k)).or_default().extend(v);
+                    map
+                },
+            )
             .into_iter()
             .collect::<Vec<_>>();
 
@@ -346,7 +349,10 @@ impl CompilerTool {
             let (mut flags, maybe_pch) = tool.to_flags_impl(cfg, env);
             flags.files = files.iter().map(|file| file.to_string()).collect();
 
-            let tree = FlagsTree { flags, dependants: vec![] };
+            let tree = FlagsTree {
+                flags,
+                dependants: vec![],
+            };
 
             if let Some(p) = maybe_pch {
                 pch_root_idx = Some(result.len());
@@ -367,7 +373,11 @@ impl CompilerTool {
         result
     }
 
-    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> (Flags, Option<PathBuf>) {
+    pub fn to_flags_impl(
+        &self,
+        cfg: &Configuration,
+        env: MsBuildEnvironment,
+    ) -> (Flags, Option<PathBuf>) {
         let Self {
             additional_options,
             optimization,
@@ -601,16 +611,11 @@ impl CompilerTool {
         let output_file = if !object_file.is_empty() {
             let object_file = env.expand(object_file);
 
-            // TODO: Incorrect because of two reasons.
-            // msbuild doesn't actually match on extension. It does it somehow differently:
-            // Fo"E:\Projects\vostok\sources\/../binaries/Win32/intermediates/Release (static)/lua.5.1.4\"
-            //
-            // Here extension would be .4, which is wrong :)
-            //
-            // Also / as an end counts, not just \.
-            // TODO: This needs proper handling
             let mut fo_path = object_file.clone();
-            if Path::new(&object_file).extension().is_none() && !object_file.ends_with('\\') {
+            let is_specific_obj = Path::new(&object_file)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
+            if !is_specific_obj && !object_file.ends_with(['\\', '/']) {
                 fo_path.push('\\');
                 fo_path.push('\\');
             }
@@ -823,15 +828,28 @@ mod tests {
         let sibling = &trees[1];
 
         // Yc root has exactly one Yu dependant.
-        assert_eq!(yc_root.dependants.len(), 1, "Yc root should have one Yu dependant");
+        assert_eq!(
+            yc_root.dependants.len(),
+            1,
+            "Yc root should have one Yu dependant"
+        );
         assert!(yc_root.flags.files.iter().any(|f| f.contains("pch.cpp")));
 
         let (yu_tree, _pch_path) = &yc_root.dependants[0];
-        assert!(yu_tree.flags.files.iter().any(|f| f.contains("use_pch.cpp")));
+        assert!(
+            yu_tree
+                .flags
+                .files
+                .iter()
+                .any(|f| f.contains("use_pch.cpp"))
+        );
         assert!(yu_tree.dependants.is_empty());
 
         // The non-PCH file is independent.
-        assert!(sibling.dependants.is_empty(), "other.cpp should not be a PCH dependant");
+        assert!(
+            sibling.dependants.is_empty(),
+            "other.cpp should not be a PCH dependant"
+        );
         assert!(sibling.flags.files.iter().any(|f| f.contains("other.cpp")));
     }
 }
