@@ -348,6 +348,10 @@ impl LinkerTool {
             rsp_flags.push(format!("/BASE:\"{base_address}\""));
         }
 
+        let randomized_base_address =
+            Some(randomized_base_address.unwrap_or(RandomizedBaseAddress::_2));
+        let data_execution_prevention =
+            Some(data_execution_prevention.unwrap_or(DataExecutionPrevention::_2));
         append_flags!(
             rsp_flags,
             [
@@ -387,6 +391,17 @@ impl LinkerTool {
                 rsp_flags.push(dep);
             }
         }
+
+        // VS2008 likely adds these to every Win32 linker invocation by default, independent
+        // of what AdditionalDependencies contains in the vcproj.
+        rsp_flags.extend(
+            [
+                "kernel32.lib", "user32.lib", "gdi32.lib", "winspool.lib",
+                "comdlg32.lib", "advapi32.lib", "shell32.lib", "ole32.lib",
+                "oleaut32.lib", "uuid.lib", "odbc32.lib", "odbccp32.lib",
+            ]
+            .map(String::from),
+        );
 
         let files = LibTool::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
