@@ -613,9 +613,14 @@ impl CompilerTool {
             let object_file = env.expand(object_file);
 
             let mut fo_path = object_file.clone();
-            if !is_specific_obj && !object_file.ends_with(['\\', '/']) {
-                fo_path.push('\\');
-                fo_path.push('\\');
+            if !is_specific_obj {
+                if fo_path.ends_with("\\\\") || fo_path.ends_with('/') {
+                    // already correctly terminated
+                } else if fo_path.ends_with('\\') {
+                    fo_path.push('\\');
+                } else {
+                    fo_path.push_str("\\\\");
+                }
             }
             rsp_flags.push(format!("/Fo\"{fo_path}\""));
             object_file
