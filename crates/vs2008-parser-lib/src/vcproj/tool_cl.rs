@@ -609,12 +609,10 @@ impl CompilerTool {
 
         // /Fo"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\\"
         let output_file = if !object_file.is_empty() {
+            let is_specific_obj = object_file.to_ascii_lowercase().ends_with(".obj");
             let object_file = env.expand(object_file);
 
             let mut fo_path = object_file.clone();
-            let is_specific_obj = Path::new(&object_file)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
             if !is_specific_obj && !object_file.ends_with(['\\', '/']) {
                 fo_path.push('\\');
                 fo_path.push('\\');
