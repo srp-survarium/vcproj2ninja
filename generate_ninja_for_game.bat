@@ -13,8 +13,8 @@ set "SLN_PATH=%VOSTOK_DIR%\sources\vostok v2.0.sln"
 cargo run --release --                         ^
   --sln-path "%SLN_PATH%"                      ^
   --configuration-platform "Master Gold|Win32" ^
-  --project-name "game"                        ^
-  --output-dir "%OUTPUT_DIR%"
-  :: --project-name "survarium - PC - DirectX 11" ^
+  --output-dir "%OUTPUT_DIR%"                  ^
+  --project-name "survarium - PC - DirectX 11"
+  REM --project-name "game"                        ^
 
 popd
