@@ -33,6 +33,9 @@ pub struct NinjaBuildStatement {
     pub implicit_outputs: Vec<String>,
     pub rule: &'static str,
     pub inputs: Vec<String>,
+    /// Implicit inputs (`|`): trigger rebuilds but are not passed as command arguments.
+    /// Use for prerequisites baked into flags (dep libs, pch files).
+    pub implicit_inputs: Vec<String>,
     pub order_only_deps: Vec<String>,
     /// The `flags = ...` binding. `None` for rules that carry no flags (e.g. phony).
     pub flags: Option<String>,
@@ -53,18 +56,27 @@ impl NinjaBuildStatement {
         }
 
         let has_inputs = !self.inputs.is_empty();
+        let has_implicit = !self.implicit_inputs.is_empty();
         let has_oo = !self.order_only_deps.is_empty();
 
-        if !has_inputs && !has_oo {
+        if !has_inputs && !has_implicit && !has_oo {
             writeln!(out, "    : {}", self.rule)?;
         } else {
             writeln!(out, "    : {} $", self.rule)?;
-            let last = self.inputs.len().saturating_sub(1);
+            let last_explicit = self.inputs.len().saturating_sub(1);
             for (i, inp) in self.inputs.iter().enumerate() {
-                if i < last || has_oo {
+                if i < last_explicit || has_implicit || has_oo {
                     writeln!(out, "    {} $", ninja_escape(inp))?;
                 } else {
                     writeln!(out, "    {}", ninja_escape(inp))?;
+                }
+            }
+            let last_implicit = self.implicit_inputs.len().saturating_sub(1);
+            for (i, imp) in self.implicit_inputs.iter().enumerate() {
+                if i < last_implicit || has_oo {
+                    writeln!(out, "    | {} $", ninja_escape(imp))?;
+                } else {
+                    writeln!(out, "    | {}", ninja_escape(imp))?;
                 }
             }
             if has_oo {
@@ -122,6 +134,7 @@ impl NinjaFile {
             implicit_outputs: vec![],
             rule: "phony",
             inputs: vec![output_file.clone()],
+            implicit_inputs: vec![],
             order_only_deps: vec![],
             flags: None,
         });
@@ -246,7 +259,7 @@ fn collect_cl_tree(
             .map(|src| normalize_path(proj_dir, src))
             .collect();
 
-        let order_only_deps: Vec<String> = depends_on_pch
+        let implicit_inputs: Vec<String> = depends_on_pch
             .map(|p| p.to_str().expect("pch dep is UTF-8").to_string())
             .into_iter()
             .collect();
@@ -260,7 +273,8 @@ fn collect_cl_tree(
             implicit_outputs,
             rule: "cl",
             inputs,
-            order_only_deps,
+            implicit_inputs,
+            order_only_deps: vec![],
             flags: Some(flag_str),
         });
     }
@@ -301,7 +315,8 @@ fn build_final_statement(
         implicit_outputs: vec![],
         rule,
         inputs: flags.files.clone(),
-        order_only_deps: depends_on.to_vec(),
+        implicit_inputs: depends_on.to_vec(),
+        order_only_deps: vec![],
         flags: Some(flag_str),
     }
 }
