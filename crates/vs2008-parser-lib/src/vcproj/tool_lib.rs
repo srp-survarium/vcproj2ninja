@@ -30,7 +30,7 @@ flag_enum! {
 impl LibTool {
     pub fn to_flags(
         &self,
-        vcproj_sln_path: &str,
+        vcproj_rpath: &str,
         cfg: &Configuration,
         vcproject: &VCProject,
         env: MsBuildEnvironment,
@@ -83,7 +83,7 @@ impl LibTool {
             rsp_flags.push(additional_options.clone());
         }
 
-        let files = Self::file_flags(&vcproject.files, &cfg.name, vcproj_sln_path, env);
+        let files = Self::file_flags(&vcproject.files, &cfg.name, vcproj_rpath, env);
 
         Flags {
             output_file: output_file.to_string(),
@@ -97,12 +97,12 @@ impl LibTool {
     pub fn file_flags(
         files: &Files,
         configuration_platform: &str,
-        vcproj_sln_path: &str,
+        vcproj_rpath: &str,
         env: MsBuildEnvironment,
     ) -> Vec<String> {
         let vcproj_dir = {
             let mut vcproj_dir = Path::new(env.solution_dir).to_path_buf();
-            for vcproj_part in Path::new(vcproj_sln_path).components() {
+            for vcproj_part in Path::new(vcproj_rpath).components() {
                 vcproj_dir.push(vcproj_part);
             }
 
