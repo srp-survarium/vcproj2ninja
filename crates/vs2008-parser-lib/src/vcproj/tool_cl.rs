@@ -826,18 +826,36 @@ mod tests {
         // Sort puts Yc (/Yc = key 0) first.
         let yc_group = &groups[0];
         assert!(yc_group.flags.files.iter().any(|f| f.contains("pch.cpp")));
-        assert!(yc_group.pch_output.is_some(), "Yc group should have pch_output");
+        assert!(
+            yc_group.pch_output.is_some(),
+            "Yc group should have pch_output"
+        );
         assert!(yc_group.pch_input.is_none());
 
         // Yu group consumes the PCH.
         let yu_group = &groups[1];
-        assert!(yu_group.flags.files.iter().any(|f| f.contains("use_pch.cpp")));
-        assert!(yu_group.pch_input.is_some(), "Yu group should have pch_input");
+        assert!(
+            yu_group
+                .flags
+                .files
+                .iter()
+                .any(|f| f.contains("use_pch.cpp"))
+        );
+        assert!(
+            yu_group.pch_input.is_some(),
+            "Yu group should have pch_input"
+        );
         assert!(yu_group.pch_output.is_none());
 
         // The non-PCH file is independent.
         let other_group = &groups[2];
-        assert!(other_group.flags.files.iter().any(|f| f.contains("other.cpp")));
+        assert!(
+            other_group
+                .flags
+                .files
+                .iter()
+                .any(|f| f.contains("other.cpp"))
+        );
         assert!(other_group.pch_input.is_none());
         assert!(other_group.pch_output.is_none());
     }

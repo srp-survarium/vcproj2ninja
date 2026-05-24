@@ -45,16 +45,27 @@ pub struct NinjaBuildStatement {
 
 impl NinjaBuildStatement {
     fn render(&self, out: &mut impl FmtWrite) -> std::fmt::Result {
-        if self.outputs.is_empty() {
+        let Self {
+            outputs,
+            implicit_outputs,
+            rule,
+            inputs,
+            implicit_inputs,
+            order_only_deps,
+            flags,
+            pool,
+        } = self;
+
+        if outputs.is_empty() {
             return Ok(());
         }
 
         writeln!(out, "build $")?;
-        for o in &self.outputs {
+        for o in outputs {
             writeln!(out, "    {} $", ninja_escape(o))?;
         }
         // Implicit outputs: `|` appears once before the first item.
-        for (i, o) in self.implicit_outputs.iter().enumerate() {
+        for (i, o) in implicit_outputs.iter().enumerate() {
             if i == 0 {
                 writeln!(out, "    | {} $", ninja_escape(o))?;
             } else {
@@ -62,16 +73,16 @@ impl NinjaBuildStatement {
             }
         }
 
-        let has_inputs = !self.inputs.is_empty();
-        let has_implicit = !self.implicit_inputs.is_empty();
-        let has_oo = !self.order_only_deps.is_empty();
+        let has_inputs = !inputs.is_empty();
+        let has_implicit = !implicit_inputs.is_empty();
+        let has_oo = !order_only_deps.is_empty();
 
         if !has_inputs && !has_implicit && !has_oo {
-            writeln!(out, "    : {}", self.rule)?;
+            writeln!(out, "    : {rule}")?;
         } else {
-            writeln!(out, "    : {} $", self.rule)?;
-            let last_explicit = self.inputs.len().saturating_sub(1);
-            for (i, inp) in self.inputs.iter().enumerate() {
+            writeln!(out, "    : {rule} $")?;
+            let last_explicit = inputs.len().saturating_sub(1);
+            for (i, inp) in inputs.iter().enumerate() {
                 if i < last_explicit || has_implicit || has_oo {
                     writeln!(out, "    {} $", ninja_escape(inp))?;
                 } else {
@@ -79,8 +90,8 @@ impl NinjaBuildStatement {
                 }
             }
             // Implicit inputs: `|` appears once before the first item.
-            let last_implicit = self.implicit_inputs.len().saturating_sub(1);
-            for (i, imp) in self.implicit_inputs.iter().enumerate() {
+            let last_implicit = implicit_inputs.len().saturating_sub(1);
+            for (i, imp) in implicit_inputs.iter().enumerate() {
                 let prefix = if i == 0 { "    | " } else { "      " };
                 if i < last_implicit || has_oo {
                     writeln!(out, "{}{} $", prefix, ninja_escape(imp))?;
@@ -90,17 +101,17 @@ impl NinjaBuildStatement {
             }
             if has_oo {
                 write!(out, "    ||")?;
-                for dep in &self.order_only_deps {
+                for dep in order_only_deps {
                     write!(out, " {}", ninja_escape(dep))?;
                 }
                 writeln!(out)?;
             }
         }
 
-        if let Some(flags) = &self.flags {
+        if let Some(flags) = flags {
             writeln!(out, "  flags = {flags}")?;
         }
-        if let Some(pool) = &self.pool {
+        if let Some(pool) = pool {
             writeln!(out, "  pool = {pool}")?;
         }
         writeln!(out)
@@ -109,12 +120,24 @@ impl NinjaBuildStatement {
 
 impl NinjaFile {
     pub fn write(&self, stem: &str, rsp_dir: &Path) -> NinjaOutput {
+        let Self {
+            cl,
+            final_step,
+            proj_dir,
+            depends_on,
+        } = self;
         let mut statements: Vec<NinjaBuildStatement> = vec![];
         let mut rsp_files: Vec<(PathBuf, String)> = vec![];
 
-        for (i, group) in self.cl.iter().enumerate() {
+        for (i, group) in cl.iter().enumerate() {
+            let ClGroup {
+                flags,
+                pch_output,
+                pch_input,
+                fd_path,
+            } = group;
+
             let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
-            let flags = &group.flags;
 
             if !flags.files.is_empty() {
                 let outputs: Vec<String> = flags
@@ -123,8 +146,7 @@ impl NinjaFile {
                     .map(|src| normalize_path(&compute_obj(&flags.output_file, src)))
                     .collect();
 
-                let implicit_outputs: Vec<String> = group
-                    .pch_output
+                let implicit_outputs: Vec<String> = pch_output
                     .as_deref()
                     .map(|p| normalize_path(p.to_str().expect("pch path is UTF-8")))
                     .into_iter()
@@ -133,11 +155,10 @@ impl NinjaFile {
                 let inputs: Vec<String> = flags
                     .files
                     .iter()
-                    .map(|src| normalize_rpath(&self.proj_dir, src))
+                    .map(|src| normalize_rpath(&proj_dir, src))
                     .collect();
 
-                let implicit_inputs: Vec<String> = group
-                    .pch_input
+                let implicit_inputs: Vec<String> = pch_input
                     .as_deref()
                     .map(|p| normalize_path(p.to_str().expect("pch dep is UTF-8")))
                     .into_iter()
@@ -147,7 +168,7 @@ impl NinjaFile {
                     .flags
                     .replace("$(RspFile)", rsp_path.to_str().unwrap());
 
-                let pool = group.fd_path.as_deref().map(fd_pool_name);
+                let pool = fd_path.as_deref().map(fd_pool_name);
 
                 statements.push(NinjaBuildStatement {
                     outputs,
@@ -164,15 +185,15 @@ impl NinjaFile {
             rsp_files.push((rsp_path, flags.rsp_file_content()));
         }
 
-        let output_file = match &self.final_step {
+        let output_file = match &final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
                 statements.push(build_final_statement(
                     "lib",
                     flags,
                     &rsp_path,
-                    &self.proj_dir,
-                    &self.depends_on,
+                    &proj_dir,
+                    &depends_on,
                 ));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
@@ -183,8 +204,8 @@ impl NinjaFile {
                     "link",
                     flags,
                     &rsp_path,
-                    &self.proj_dir,
-                    &self.depends_on,
+                    &proj_dir,
+                    &depends_on,
                 ));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
@@ -203,13 +224,19 @@ impl NinjaFile {
         });
 
         let mut out = String::new();
-        writeln!(out, "proj_dir = {}", self.proj_dir).unwrap();
+        writeln!(out, "proj_dir = {}", proj_dir).unwrap();
         writeln!(out).unwrap();
 
         // Declare one pool per unique /Fd path so parallel cl steps don't race on the PDB.
         let mut seen_pools: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for group in &self.cl {
-            if let Some(fd_path) = &group.fd_path {
+        for ClGroup {
+            fd_path,
+            flags: _,
+            pch_output: _,
+            pch_input: _,
+        } in cl
+        {
+            if let Some(fd_path) = fd_path {
                 let name = fd_pool_name(fd_path);
                 if seen_pools.insert(name.clone()) {
                     writeln!(out, "pool {name}").unwrap();

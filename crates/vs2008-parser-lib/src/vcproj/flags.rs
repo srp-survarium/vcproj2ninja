@@ -38,8 +38,15 @@ pub struct Flags {
 impl Flags {
     /// Build the rsp file content: rsp_flags on first line(s), then one filename per line.
     pub fn rsp_file_content(&self) -> String {
-        let mut content = self.rsp_flags.clone();
-        for file in &self.files {
+        let Self {
+            rsp_flags,
+            files,
+            output_file: _,
+            import_library: _,
+            flags: _,
+        } = self;
+        let mut content = rsp_flags.clone();
+        for file in files {
             content.push('\n');
             content.push('"');
             content.push_str(file);
