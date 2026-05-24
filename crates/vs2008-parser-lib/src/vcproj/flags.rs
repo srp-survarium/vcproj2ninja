@@ -19,6 +19,10 @@ pub struct Flags {
     /// LIB/LINK: expanded output file path, e.g. `E:\...\libraries\mylib.lib`
     pub output_file: String,
 
+    /// For DLL link steps: the import library path (`/IMPLIB:`).
+    /// Downstream projects link against this, not the `.dll` itself.
+    pub import_library: Option<String>,
+
     /// Flags passed to the compiler.
     /// `$(RspFile)` requires interpolation.
     pub flags: String,

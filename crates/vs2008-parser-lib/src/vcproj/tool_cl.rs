@@ -667,6 +667,7 @@ impl CompilerTool {
         (
             Flags {
                 output_file,
+                import_library: None,
                 flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
                 rsp_flags: rsp_flags.join(" "),
                 files: vec![],

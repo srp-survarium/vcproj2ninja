@@ -1,9 +1,9 @@
-use vs2008_parser_proc::{flag_enum, ParseXml};
+use vs2008_parser_proc::{ParseXml, flag_enum};
 
-use super::flags::{append_flags, Flags};
+use super::ConfigurationType;
+use super::flags::{Flags, append_flags};
 use super::macros::*;
 use super::utils;
-use super::ConfigurationType;
 use super::{Configuration, LibTool, MsBuildEnvironment, VCProject};
 
 use std::path::Path;
@@ -362,14 +362,15 @@ impl LinkerTool {
             ]
         );
 
-        {
+        let import_library = {
             let Some(import_library) = import_library else {
                 unimplemented!("TODO: Figure out what the default should be")
             };
             let import_library = env.expand(import_library);
             let import_library = utils::clean(&import_library);
             rsp_flags.push(format!("/IMPLIB:\"{import_library}\""));
-        }
+            import_library.to_string()
+        };
 
         append_flags!(rsp_flags, [target_machine]);
 
@@ -384,7 +385,7 @@ impl LinkerTool {
         append_flags!(rsp_flags, [additional_options]);
 
         for dep in additional_dependencies.iter().flat_map(|s| parse_deps(s)) {
-            let dep = env.expand(&dep);
+            let dep = env.expand(dep);
             if dep.contains(' ') {
                 rsp_flags.push(format!("\"{dep}\""));
             } else {
@@ -396,9 +397,18 @@ impl LinkerTool {
         // of what AdditionalDependencies contains in the vcproj.
         rsp_flags.extend(
             [
-                "kernel32.lib", "user32.lib", "gdi32.lib", "winspool.lib",
-                "comdlg32.lib", "advapi32.lib", "shell32.lib", "ole32.lib",
-                "oleaut32.lib", "uuid.lib", "odbc32.lib", "odbccp32.lib",
+                "kernel32.lib",
+                "user32.lib",
+                "gdi32.lib",
+                "winspool.lib",
+                "comdlg32.lib",
+                "advapi32.lib",
+                "shell32.lib",
+                "ole32.lib",
+                "oleaut32.lib",
+                "uuid.lib",
+                "odbc32.lib",
+                "odbccp32.lib",
             ]
             .map(String::from),
         );
@@ -407,6 +417,7 @@ impl LinkerTool {
 
         Flags {
             output_file: output_file.to_string(),
+            import_library: Some(import_library),
             flags: "@$(RspFile) /NOLOGO /ERRORREPORT:PROMPT".to_string(),
             rsp_flags: rsp_flags.join(" "),
             files,
@@ -418,13 +429,13 @@ impl LinkerTool {
 /// Items are space-separated; a quoted item `"path with spaces.lib"` is treated as one token.
 fn parse_deps(s: &str) -> Vec<&str> {
     use nom::{
+        Parser,
         branch::alt,
         bytes::complete::{tag, take_till1, take_until},
         character::complete::multispace0,
         error::Error,
         multi::many0,
         sequence::{delimited, preceded},
-        Parser,
     };
 
     const QUOTE: &str = "\"";

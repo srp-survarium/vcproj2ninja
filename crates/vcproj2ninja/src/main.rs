@@ -9,7 +9,7 @@ use clap::Parser;
 use uuid::Uuid;
 
 use ninja::{FinalStep, NinjaFile};
-use vs2008_parser_lib::vcproj::{ConfigurationType, MsBuildEnvironment};
+use vs2008_parser_lib::vcproj::{ConfigurationType, Flags, MsBuildEnvironment};
 use vs2008_parser_lib::{sln, vcproj};
 
 #[derive(clap::Parser)]
@@ -43,7 +43,8 @@ fn main() -> anyhow::Result<()> {
         verbose,
     } = Cli::parse();
 
-    let sln = std::fs::read_to_string(&sln_path)?;
+    let sln = std::fs::read_to_string(&sln_path)
+        .with_context(|| format!("Reading sln '{}'", sln_path.display()))?;
     let sln = match sln::Sln::parse(&sln) {
         Ok((_leftovers, sln)) => sln,
         Err(error) => anyhow::bail!("{error}"),
@@ -66,7 +67,7 @@ fn main() -> anyhow::Result<()> {
 
     // Phase 1: collect all ninja files before touching the output directory.
     let mut ninja_files: Vec<(Uuid, String, NinjaFile)> = vec![];
-    let mut guid_to_output: HashMap<Uuid, String> = HashMap::new();
+    let mut guid_to_link_output: HashMap<Uuid, String> = HashMap::new();
 
     for dep in deps {
         project_path.as_mut_os_string().truncate(base_len);
@@ -75,7 +76,8 @@ fn main() -> anyhow::Result<()> {
             project_path.push(component);
         }
 
-        let vcproj_text = std::fs::read_to_string(&project_path)?;
+        let vcproj_text = std::fs::read_to_string(&project_path)
+            .with_context(|| format!("Reading '{}' at '{}'", dep.name, project_path.display()))?;
         let vcproj = vcproj::VCProject::parse_xml(&vcproj_text)
             .with_context(|| format!("Failed parsing '{}' at '{}'", dep.name, dep.path))?;
 
@@ -153,11 +155,14 @@ fn main() -> anyhow::Result<()> {
             ),
         };
 
-        let output_file = match &final_step {
-            FinalStep::Lib(f) => f.output_file.clone(),
-            FinalStep::Link(f) => f.output_file.clone(),
+        let link_output_file = match &final_step {
+            FinalStep::Link(Flags {
+                import_library: Some(import_library),
+                ..
+            }) => import_library.clone(),
+            FinalStep::Lib(flags) | FinalStep::Link(flags) => flags.output_file.clone(),
         };
-        guid_to_output.insert(vcproj.guid, output_file);
+        guid_to_link_output.insert(vcproj.guid, link_output_file);
 
         ninja_files.push((
             vcproj.guid,
@@ -171,19 +176,50 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    // Populate order-only deps from sln project dependencies.
+    // Populate order-only deps and linker inputs from sln project dependencies.
+    //
+    // The authoritative source for which libs a project needs is the sln
+    // ProjectSection(ProjectDependencies), collected transitively.
+    //
+    // A more precise alternative would be to scan each project's source files and
+    // their transitively included headers (resolved via the /I include paths) for
+    // `#pragma comment(lib, "name.lib")` directives, then map the bare name to a
+    // full path. This avoids false positives from deps that don't actually
+    // contribute symbols, but requires a simplified C preprocessor (following
+    // #include chains without macro expansion or conditional evaluation). The COFF
+    // .drectve section approach is equivalent but doesn't work for LTCG anonymous
+    // objects, and `dumpbin /DIRECTIVES` also returns empty for them.
     let sln_projects: HashMap<Uuid, &sln::Project> =
         sln.projects.iter().map(|p| (p.uuid, p)).collect();
     for (guid, _name, ninja_file) in &mut ninja_files {
-        let Some(sln_proj) = sln_projects.get(guid) else {
-            continue;
-        };
-        let Some(section_deps) = &sln_proj.section_dependencies else {
-            continue;
-        };
-        for dep in &section_deps.deps {
-            if let Some(output) = guid_to_output.get(&dep.uuid) {
-                ninja_file.depends_on.push(output.clone());
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(*guid);
+        collect_transitive_deps(
+            *guid,
+            &sln_projects,
+            &guid_to_link_output,
+            &mut visited,
+            &mut ninja_file.depends_on,
+        );
+
+        // For link steps, bake the dep lib paths directly into rsp_flags so
+        // link.exe sees them as explicit inputs.
+        if let FinalStep::Link(ref mut flags) = ninja_file.final_step {
+            for dep_path in &ninja_file.depends_on {
+                let path = std::path::Path::new(dep_path);
+                let Some(ext) = path.extension() else {
+                    continue;
+                };
+
+                let lib_path = match ext.as_encoded_bytes() {
+                    b"lib" => dep_path.clone(),
+                    _ => unimplemented!(
+                        "Linker dependencies can only be libraries, yet: {}",
+                        ext.to_string_lossy()
+                    ),
+                };
+                flags.rsp_flags.push(' ');
+                flags.rsp_flags.push_str(&lib_path);
             }
         }
     }
@@ -202,12 +238,15 @@ fn main() -> anyhow::Result<()> {
 
     // Phase 2: clear and recreate the output directory.
     if output_dir.exists() {
-        std::fs::remove_dir_all(&output_dir)?;
+        std::fs::remove_dir_all(&output_dir)
+            .with_context(|| format!("Clearing output dir '{}'", output_dir.display()))?;
     }
-    std::fs::create_dir_all(&output_dir)?;
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("Creating output dir '{}'", output_dir.display()))?;
 
     let rsp_dir = output_dir.join("rsp");
-    std::fs::create_dir_all(&rsp_dir)?;
+    std::fs::create_dir_all(&rsp_dir)
+        .with_context(|| format!("Creating rsp dir '{}'", rsp_dir.display()))?;
 
     // Phase 3: assign unique filenames and write.
     let mut used: HashSet<String> = HashSet::new();
@@ -251,6 +290,31 @@ fn print_tree_flags(tool: &str, name: &str, tree: &vs2008_parser_lib::vcproj::Fl
     eprintln!("[{tool}][{name}]: {}", tree.flags.rsp_flags);
     for (child, _) in &tree.dependants {
         print_tree_flags(tool, name, child);
+    }
+}
+
+fn collect_transitive_deps(
+    guid: Uuid,
+    sln_projects: &HashMap<Uuid, &sln::Project>,
+    guid_to_link_output: &HashMap<Uuid, String>,
+    visited: &mut std::collections::HashSet<Uuid>,
+    result: &mut Vec<String>,
+) {
+    let Some(sln_proj) = sln_projects.get(&guid) else {
+        return;
+    };
+    let Some(section_deps) = &sln_proj.section_dependencies else {
+        return;
+    };
+
+    for dep in &section_deps.deps {
+        if !visited.insert(dep.uuid) {
+            continue;
+        }
+        if let Some(output) = guid_to_link_output.get(&dep.uuid) {
+            result.push(output.clone());
+        }
+        collect_transitive_deps(dep.uuid, sln_projects, guid_to_link_output, visited, result);
     }
 }
 

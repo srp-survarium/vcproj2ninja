@@ -37,20 +37,46 @@ impl NinjaFile {
 
         let mut counter = 0usize;
         for tree in &self.cl {
-            write_cl_tree(&mut out, tree, rsp_dir, stem, &mut counter, &self.proj_dir, &mut rsp_files, None).unwrap();
+            write_cl_tree(
+                &mut out,
+                tree,
+                rsp_dir,
+                stem,
+                &mut counter,
+                &self.proj_dir,
+                &mut rsp_files,
+                None,
+            )
+            .unwrap();
         }
 
         let output_file = match &self.final_step {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
-                write_final(&mut out, "lib", flags, &rsp_path, &self.proj_dir, &self.depends_on).unwrap();
+                write_final(
+                    &mut out,
+                    "lib",
+                    flags,
+                    &rsp_path,
+                    &self.proj_dir,
+                    &self.depends_on,
+                )
+                .unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
 
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
-                write_final(&mut out, "link", flags, &rsp_path, &self.proj_dir, &self.depends_on).unwrap();
+                write_final(
+                    &mut out,
+                    "link",
+                    flags,
+                    &rsp_path,
+                    &self.proj_dir,
+                    &self.depends_on,
+                )
+                .unwrap();
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
             }
@@ -118,7 +144,11 @@ fn compute_obj(output_file: &str, src: &str) -> String {
     {
         output_file.to_string()
     } else {
-        let sep = if output_file.ends_with(['\\', '/']) { "" } else { "\\" };
+        let sep = if output_file.ends_with(['\\', '/']) {
+            ""
+        } else {
+            "\\"
+        };
         let stem = Path::new(src)
             .file_stem()
             .expect("source has stem")
@@ -145,11 +175,27 @@ fn write_cl_tree(
 
     let implicit_out = tree.dependants.first().map(|(_, p)| p.as_path());
 
-    write_cl_node(out, &tree.flags, &rsp_path, proj_dir, implicit_out, depends_on_dep)?;
+    write_cl_node(
+        out,
+        &tree.flags,
+        &rsp_path,
+        proj_dir,
+        implicit_out,
+        depends_on_dep,
+    )?;
     rsp_files.push((rsp_path, tree.flags.rsp_file_content()));
 
     for (dep_tree, pch_path) in &tree.dependants {
-        write_cl_tree(out, dep_tree, rsp_dir, stem, counter, proj_dir, rsp_files, Some(pch_path))?;
+        write_cl_tree(
+            out,
+            dep_tree,
+            rsp_dir,
+            stem,
+            counter,
+            proj_dir,
+            rsp_files,
+            Some(pch_path),
+        )?;
     }
 
     Ok(())
@@ -163,7 +209,13 @@ fn write_cl_node(
     implicit_out: Option<&std::path::Path>,
     depends_on_dep: Option<&std::path::Path>,
 ) -> std::fmt::Result {
-    let Flags { output_file, flags, rsp_flags: _, files } = flags;
+    let Flags {
+        output_file,
+        flags,
+        rsp_flags: _,
+        files,
+        import_library: _,
+    } = flags;
 
     if files.is_empty() {
         return Ok(());
@@ -171,10 +223,18 @@ fn write_cl_node(
 
     writeln!(out, "build $")?;
     for src in files {
-        writeln!(out, "    {} $", ninja_path("", &compute_obj(output_file, src)))?;
+        writeln!(
+            out,
+            "    {} $",
+            ninja_path("", &compute_obj(output_file, src))
+        )?;
     }
     if let Some(p) = implicit_out {
-        writeln!(out, "    | {} $", ninja_path("", p.to_str().expect("pch path is UTF-8")))?;
+        writeln!(
+            out,
+            "    | {} $",
+            ninja_path("", p.to_str().expect("pch path is UTF-8"))
+        )?;
     }
 
     write!(out, "    : cl")?;
@@ -182,7 +242,11 @@ fn write_cl_node(
         write!(out, " {}", ninja_path(proj_dir, src))?;
     }
     if let Some(dep) = depends_on_dep {
-        write!(out, " || {}", ninja_path("", dep.to_str().expect("pch dep is UTF-8")))?;
+        write!(
+            out,
+            " || {}",
+            ninja_path("", dep.to_str().expect("pch dep is UTF-8"))
+        )?;
     }
     writeln!(out)?;
 
@@ -204,10 +268,14 @@ fn write_final(
         flags,
         rsp_flags: _,
         files,
+        import_library,
     } = flags;
 
     writeln!(out, "build $")?;
     writeln!(out, "    {} $", ninja_path("", output_file))?;
+    if let Some(import_library) = import_library {
+        writeln!(out, "    {} $", ninja_path("", import_library))?;
+    }
 
     let has_oo = !depends_on.is_empty();
 

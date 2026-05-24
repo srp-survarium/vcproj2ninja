@@ -87,6 +87,7 @@ impl LibTool {
 
         Flags {
             output_file: output_file.to_string(),
+            import_library: None,
             flags: "@$(RspFile) /NOLOGO".to_string(),
             rsp_flags: rsp_flags.join(" "),
             files,
