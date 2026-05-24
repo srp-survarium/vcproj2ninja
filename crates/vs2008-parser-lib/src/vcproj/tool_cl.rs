@@ -352,7 +352,12 @@ impl CompilerTool {
                 pch_root_idx = Some(result.len());
                 pch_path = Some(p);
                 result.push(tree);
-            } else if let (Some(idx), Some(p)) = (pch_root_idx, &pch_path) {
+            } else if let (Some(idx), Some(p)) = (pch_root_idx, &pch_path)
+                && matches!(
+                    tool.use_precompiled_header,
+                    Some(UsePrecompiledHeader::_2 | UsePrecompiledHeader::_3)
+                )
+            {
                 result[idx].dependants.push((tree, p.clone()));
             } else {
                 result.push(tree);
@@ -758,5 +763,75 @@ impl CompilerTool {
             .entry(cl_tool)
             .or_default()
             .push(file.relative_path.as_str());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::vcproj::{MsBuildEnvironment, VCProject};
+
+    const PCH_VCPROJ: &str = r#"<?xml version="1.0" encoding="Windows-1252"?>
+<VisualStudioProject
+    ProjectType="Visual C++"
+    Version="9,00"
+    Name="myproject"
+    ProjectGUID="{00000000-0000-0000-0000-000000000001}"
+    RootNamespace="myproject"
+    TargetFrameworkVersion="196613"
+    >
+    <Platforms><Platform Name="Win32"/></Platforms>
+    <Configurations>
+        <Configuration
+            Name="Release|Win32"
+            OutputDirectory="C:\out"
+            IntermediateDirectory="C:\int\myproject"
+            ConfigurationType="4"
+            >
+            <Tool Name="VCCLCompilerTool"/>
+            <Tool Name="VCLibrarianTool" OutputFile="C:\out\myproject.lib"/>
+        </Configuration>
+    </Configurations>
+    <Files>
+        <File RelativePath=".\pch.cpp">
+            <FileConfiguration Name="Release|Win32">
+                <Tool Name="VCCLCompilerTool" UsePrecompiledHeader="1"/>
+            </FileConfiguration>
+        </File>
+        <File RelativePath=".\use_pch.cpp">
+            <FileConfiguration Name="Release|Win32">
+                <Tool Name="VCCLCompilerTool" UsePrecompiledHeader="2"/>
+            </FileConfiguration>
+        </File>
+        <File RelativePath=".\other.cpp"/>
+    </Files>
+</VisualStudioProject>"#;
+
+    #[test]
+    fn pch_yc_yu_and_independent_file_produce_chain_plus_sibling() {
+        let vcproj = VCProject::parse_xml(PCH_VCPROJ).unwrap();
+        let cfg = &vcproj.configurations[0];
+        let env = MsBuildEnvironment::get(&vcproj.name, cfg, r"C:\solution\");
+        let cl = cfg.compiler_tool.as_ref().unwrap();
+
+        let trees = cl.to_flags(cfg, &vcproj, env);
+
+        // Yc root + independent other.cpp = 2 top-level trees.
+        assert_eq!(trees.len(), 2, "expected Yc root and independent sibling");
+
+        // Sort puts Yc (/Yc = key 0) first, so trees[0] is the Yc root.
+        let yc_root = &trees[0];
+        let sibling = &trees[1];
+
+        // Yc root has exactly one Yu dependant.
+        assert_eq!(yc_root.dependants.len(), 1, "Yc root should have one Yu dependant");
+        assert!(yc_root.flags.files.iter().any(|f| f.contains("pch.cpp")));
+
+        let (yu_tree, _pch_path) = &yc_root.dependants[0];
+        assert!(yu_tree.flags.files.iter().any(|f| f.contains("use_pch.cpp")));
+        assert!(yu_tree.dependants.is_empty());
+
+        // The non-PCH file is independent.
+        assert!(sibling.dependants.is_empty(), "other.cpp should not be a PCH dependant");
+        assert!(sibling.flags.files.iter().any(|f| f.contains("other.cpp")));
     }
 }
