@@ -251,6 +251,7 @@ fn main() -> anyhow::Result<()> {
     // Phase 3: assign unique filenames and write.
     let mut used: HashSet<String> = HashSet::new();
     let mut subninja_names: Vec<String> = vec![];
+    let mut all_required_dirs: HashSet<std::path::PathBuf> = HashSet::new();
 
     for (_guid, base_name, ninja_file) in ninja_files {
         let stem = unique_stem(&mut used, &base_name);
@@ -265,7 +266,13 @@ fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("Failed to write '{}'", rsp_path.display()))?;
         }
 
+        all_required_dirs.extend(output.required_dirs);
         subninja_names.push(format!("{stem}.ninja"));
+    }
+
+    for dir in &all_required_dirs {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Creating required directory '{}'", dir.display()))?;
     }
 
     // Top-level build.ninja that includes all per-project files.

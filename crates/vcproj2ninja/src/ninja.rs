@@ -24,6 +24,8 @@ pub struct NinjaOutput {
     pub ninja_text: String,
     /// (path, content) pairs — caller writes these to disk.
     pub rsp_files: Vec<(PathBuf, String)>,
+    /// Directories that must exist before the build runs (PDB parent dirs, etc.).
+    pub required_dirs: Vec<PathBuf>,
 }
 
 /// A single ninja build statement. Paths are stored normalized but unescaped;
@@ -128,6 +130,7 @@ impl NinjaFile {
         } = self;
         let mut statements: Vec<NinjaBuildStatement> = vec![];
         let mut rsp_files: Vec<(PathBuf, String)> = vec![];
+        let mut required_dirs: Vec<PathBuf> = vec![];
 
         for (i, group) in cl.iter().enumerate() {
             let ClGroup {
@@ -169,6 +172,13 @@ impl NinjaFile {
                     .replace("$(RspFile)", rsp_path.to_str().unwrap());
 
                 let pool = fd_path.as_deref().map(fd_pool_name);
+
+                // Collect parent directory of the /Fd PDB so the caller can pre-create it.
+                if let Some(fd) = fd_path.as_deref() {
+                    if let Some(parent) = Path::new(fd).parent() {
+                        required_dirs.push(parent.to_path_buf());
+                    }
+                }
 
                 statements.push(NinjaBuildStatement {
                     outputs,
@@ -212,6 +222,11 @@ impl NinjaFile {
             }
         };
 
+        // Also ensure the directory for the final output file (lib/exe) exists.
+        if let Some(parent) = Path::new(output_file).parent() {
+            required_dirs.push(parent.to_path_buf());
+        }
+
         statements.push(NinjaBuildStatement {
             outputs: vec![stem.to_string()],
             implicit_outputs: vec![],
@@ -254,6 +269,7 @@ impl NinjaFile {
         NinjaOutput {
             ninja_text: out,
             rsp_files,
+            required_dirs,
         }
     }
 }
