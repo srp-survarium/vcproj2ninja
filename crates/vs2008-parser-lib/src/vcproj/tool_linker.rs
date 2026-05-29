@@ -304,6 +304,22 @@ impl LinkerTool {
             }
         }
 
+        // Scaleform's libgfx.lib (linked into the exe via vostok_ui) is built /MD
+        // and bundles its own complete ws2_32 import library. Without these two
+        // /NODEFAULTLIB entries the linker pulls BOTH the system ws2_32.lib and
+        // libgfx's bundled WS2_32.dll member (duplicate WS2_32_NULL_THUNK_DATA_*),
+        // and pulls msvcrt alongside the static LIBCMT (duplicate type_info) ->
+        // LNK2005 / LNK1169. VS avoids this purely through its (non-reproducible)
+        // library order, in which the system ws2_32.lib and msvcrt are never loaded
+        // at all (confirmed via link /VERBOSE: 0 loads of each). These flags make
+        // that same end-state explicit. Scoped to the exe (ConfigurationType 1):
+        // the app is pure /MT and is the only target that links libgfx, so dropping
+        // ws2_32.lib/msvcrt here is safe; a /MD DLL must keep them.
+        if matches!(cfg.configuration_type, ConfigurationType::_1) {
+            rsp_flags.push("/NODEFAULTLIB:\"ws2_32.lib\"".to_string());
+            rsp_flags.push("/NODEFAULTLIB:\"msvcrt.lib\"".to_string());
+        }
+
         if let Some(module_definition_file) = module_definition_file {
             let module_definition_file = utils::clean(module_definition_file);
 

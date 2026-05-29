@@ -179,7 +179,13 @@ fn main() -> anyhow::Result<()> {
     // Populate order-only deps and linker inputs from sln project dependencies.
     //
     // The authoritative source for which libs a project needs is the sln
-    // ProjectSection(ProjectDependencies), collected transitively.
+    // ProjectSection(ProjectDependencies), collected transitively — but only
+    // through static lib projects (ConfigurationType 4).  VS2008 stops recursion
+    // at DLL/EXE boundaries: a DLL is self-contained, so its transitive static-lib
+    // deps are internal to that DLL and must not be re-linked into the consumer.
+    // Recursing through DLLs over-includes libs (e.g. squish/nvcore/nvimage/nvtt
+    // via editor → texture_compressor → nvtt → squish) and causes CRT conflicts
+    // when those libs use a different RuntimeLibrary than the final exe.
     //
     // A more precise alternative would be to scan each project's source files and
     // their transitively included headers (resolved via the /I include paths) for
@@ -189,6 +195,10 @@ fn main() -> anyhow::Result<()> {
     // #include chains without macro expansion or conditional evaluation). The COFF
     // .drectve section approach is equivalent but doesn't work for LTCG anonymous
     // objects, and `dumpbin /DIRECTIVES` also returns empty for them.
+    let guid_to_is_static_lib: HashMap<Uuid, bool> = ninja_files
+        .iter()
+        .map(|(guid, _, nf)| (*guid, matches!(nf.final_step, FinalStep::Lib(_))))
+        .collect();
     let sln_projects: HashMap<Uuid, &sln::Project> =
         sln.projects.iter().map(|p| (p.uuid, p)).collect();
     for (guid, _name, ninja_file) in &mut ninja_files {
@@ -198,6 +208,7 @@ fn main() -> anyhow::Result<()> {
             *guid,
             &sln_projects,
             &guid_to_link_output,
+            &guid_to_is_static_lib,
             &mut visited,
             &mut ninja_file.depends_on,
         );
@@ -294,6 +305,7 @@ fn collect_transitive_deps(
     guid: Uuid,
     sln_projects: &HashMap<Uuid, &sln::Project>,
     guid_to_link_output: &HashMap<Uuid, String>,
+    guid_to_is_static_lib: &HashMap<Uuid, bool>,
     visited: &mut std::collections::HashSet<Uuid>,
     result: &mut Vec<String>,
 ) {
@@ -311,7 +323,24 @@ fn collect_transitive_deps(
         if let Some(output) = guid_to_link_output.get(&dep.uuid) {
             result.push(output.clone());
         }
-        collect_transitive_deps(dep.uuid, sln_projects, guid_to_link_output, visited, result);
+        // Only recurse into static libs. DLLs and EXEs are self-contained: their
+        // transitive static-lib deps are internal and must not be re-linked into
+        // the consumer (matches VS2008 linker behavior). Removing this gate pulls
+        // in editor/nvtt-internal libs (nvcore/nvimage/squish, the image libs)
+        // that are built /MD and reference msvcrt imports (e.g. __imp__vsnprintf_s)
+        // -> unresolved against the /MT exe (which excludes msvcrt). VS never links
+        // these into the exe.
+        let is_static_lib = guid_to_is_static_lib.get(&dep.uuid).copied().unwrap_or(false);
+        if is_static_lib {
+            collect_transitive_deps(
+                dep.uuid,
+                sln_projects,
+                guid_to_link_output,
+                guid_to_is_static_lib,
+                visited,
+                result,
+            );
+        }
     }
 }
 
