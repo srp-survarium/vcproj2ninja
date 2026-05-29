@@ -32,6 +32,19 @@ pub struct Cli {
     /// Print flags for each tool invocation in greppable format.
     #[arg(long)]
     pub verbose: bool,
+
+    /// Generate a build graph for running ninja.exe/cl.exe under Wine on Linux.
+    ///
+    /// This binary is a Windows .exe run under Wine, fed native Linux paths.
+    /// Windows path arithmetic (normalize/pathdiff) only behaves correctly on
+    /// *drive-rooted* paths; on drive-less `/home/...` it misfires. Under Wine
+    /// the Linux root is mounted at drive `Z:`, so with `--wine` we lift the
+    /// arithmetic roots (`sln_path`'s dir and each project dir) to `Z:\...` so
+    /// every emitted build-graph path comes out `Z:\...` (what ninja/cl resolve).
+    /// The actual filesystem reads/writes still use the original `/home/...`
+    /// paths, since Rust's std cannot open `Z:\` paths under Wine.
+    #[arg(long)]
+    pub wine: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -41,6 +54,7 @@ fn main() -> anyhow::Result<()> {
         configuration_platform,
         output_dir,
         verbose,
+        wine,
     } = Cli::parse();
 
     let sln = std::fs::read_to_string(&sln_path)
@@ -60,7 +74,15 @@ fn main() -> anyhow::Result<()> {
         .to_path_buf();
     let mut project_path = sln_root.clone();
 
-    let mut sln_root = sln_root.to_string_lossy().to_string();
+    // $(SolutionDir) seeds all path arithmetic and every emitted build-graph
+    // path. In --wine mode lift it to the drive-rooted `Z:\...` form so the
+    // (Windows-target) arithmetic is correct; `project_path` above keeps the
+    // native `/home/...` form for the actual `.vcproj` reads.
+    let mut sln_root = if wine {
+        unix_to_wine(&sln_root.to_string_lossy())
+    } else {
+        sln_root.to_string_lossy().into_owned()
+    };
     sln_root.push('\\');
 
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
@@ -125,6 +147,10 @@ fn main() -> anyhow::Result<()> {
             .expect("vcproj path must have a parent")
             .to_string_lossy()
             .into_owned();
+        // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
+        // target and the base for resolving relative obj/source paths, so it
+        // must agree with sln_root (Z:\...).
+        let proj_dir = if wine { unix_to_wine(&proj_dir) } else { proj_dir };
 
         let final_step = match build_cfg.configuration_type {
             ConfigurationType::_4 => {
@@ -248,6 +274,16 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&rsp_dir)
         .with_context(|| format!("Creating rsp dir '{}'", rsp_dir.display()))?;
 
+    // The rsp dir is handed to ninja so it can reference rsp files in the cl/link
+    // command lines, which run under Wine. In --wine mode pass the drive-rooted
+    // `Z:\...` form; the rsp files themselves are still written to their /home
+    // location below.
+    let rsp_dir_for_ninja: std::path::PathBuf = if wine {
+        unix_to_wine(&rsp_dir.to_string_lossy()).into()
+    } else {
+        rsp_dir.clone()
+    };
+
     // Phase 3: assign unique filenames and write.
     let mut used: HashSet<String> = HashSet::new();
     let mut subninja_names: Vec<String> = vec![];
@@ -255,13 +291,16 @@ fn main() -> anyhow::Result<()> {
 
     for (_guid, base_name, ninja_file) in ninja_files {
         let stem = unique_stem(&mut used, &base_name);
-        let output = ninja_file.write(&stem, &rsp_dir);
+        let output = ninja_file.write(&stem, &rsp_dir_for_ninja);
 
         let ninja_path = output_dir.join(format!("{stem}.ninja"));
         std::fs::write(&ninja_path, &output.ninja_text)
             .with_context(|| format!("Failed to write '{}'", ninja_path.display()))?;
 
         for (rsp_path, rsp_content) in output.rsp_files {
+            // rsp_path came back in the `Z:\...` form we passed in; write the file
+            // to its native /home location.
+            let rsp_path = native_path(&rsp_path, wine);
             std::fs::write(&rsp_path, &rsp_content)
                 .with_context(|| format!("Failed to write '{}'", rsp_path.display()))?;
         }
@@ -270,8 +309,12 @@ fn main() -> anyhow::Result<()> {
         subninja_names.push(format!("{stem}.ninja"));
     }
 
+    // required_dirs come from the emitted build graph, so in --wine mode they
+    // are `Z:\...` strings. This binary can't create those under Wine, so map
+    // back to the native `/home/...` path for the syscall.
     for dir in &all_required_dirs {
-        std::fs::create_dir_all(dir)
+        let dir = native_path(dir, wine);
+        std::fs::create_dir_all(&dir)
             .with_context(|| format!("Creating required directory '{}'", dir.display()))?;
     }
 
@@ -291,6 +334,38 @@ fn main() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+/// Lift a native Linux path to the drive-rooted form Wine exposes: the Linux
+/// root `/` is mounted at drive `Z:`, so `/home/x` -> `Z:\home\x`. Non-absolute
+/// inputs are returned unchanged.
+fn unix_to_wine(p: &str) -> String {
+    if p.starts_with('/') {
+        format!("Z:{}", p.replace('/', "\\"))
+    } else {
+        p.to_string()
+    }
+}
+
+/// Inverse of [`unix_to_wine`]: `Z:\home\x` -> `/home/x`. Used for the few real
+/// filesystem syscalls, since Rust's std cannot open `Z:\` paths under Wine.
+fn wine_to_unix(p: &str) -> String {
+    p.strip_prefix("Z:")
+        .or_else(|| p.strip_prefix("z:"))
+        .unwrap_or(p)
+        .replace('\\', "/")
+}
+
+/// Map a build-graph path back to the path this binary must touch on disk.
+/// In --wine mode the graph is in `Z:\...` form (what ninja/cl resolve), but the
+/// real file lives at the native `/home/...` path; without --wine it's already
+/// native. Used at every filesystem write/create-dir site.
+fn native_path(p: &std::path::Path, wine: bool) -> std::path::PathBuf {
+    if wine {
+        wine_to_unix(&p.to_string_lossy()).into()
+    } else {
+        p.to_path_buf()
+    }
 }
 
 fn print_cl_flags(name: &str, group: &vs2008_parser_lib::vcproj::ClGroup) {
