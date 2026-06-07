@@ -1186,7 +1186,13 @@ mod tests {
         let names: HashSet<String> = result
             .headers
             .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .expect("file name is valid UTF-8")
+                    .to_string()
+            })
             .collect();
 
         assert!(names.contains("a.h"), "a.h should be a dependency");
@@ -1217,7 +1223,13 @@ mod tests {
         let names: HashSet<String> = result
             .headers
             .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .expect("file name is valid UTF-8")
+                    .to_string()
+            })
             .collect();
         assert!(
             names.contains("maybe.h"),

@@ -193,7 +193,7 @@ impl LibTool {
             if !conflicts.insert(file) {
                 panic!(
                     "Failed parsing linker flags. The file '{}' has a conflict with the same name",
-                    file.to_string_lossy()
+                    file.to_str().expect("file path is valid UTF-8")
                 )
             }
         }

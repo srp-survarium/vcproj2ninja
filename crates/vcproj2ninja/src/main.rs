@@ -80,10 +80,11 @@ fn main() -> anyhow::Result<()> {
     // path. In --wine mode lift it to the drive-rooted `Z:\...` form so the
     // (Windows-target) arithmetic is correct; `project_path` above keeps the
     // native `/home/...` form for the actual `.vcproj` reads.
+    let sln_root_str = sln_root.to_str().expect("sln dir is valid UTF-8");
     let mut sln_root = if wine {
-        unix_to_wine(&sln_root.to_string_lossy())
+        unix_to_wine(sln_root_str)
     } else {
-        sln_root.to_string_lossy().into_owned()
+        sln_root_str.to_string()
     };
     sln_root.push('\\');
 
@@ -217,7 +218,10 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[pragma-libs][{}]: {}", dep.name, pragma_libs.join(" "));
         }
 
-        let proj_dir = proj_dir_native.to_string_lossy().into_owned();
+        let proj_dir = proj_dir_native
+            .to_str()
+            .expect("project dir is valid UTF-8")
+            .to_string();
         // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
         // target and the base for resolving relative obj/source paths, so it
         // must agree with sln_root (Z:\...).
@@ -323,7 +327,7 @@ fn main() -> anyhow::Result<()> {
                     b"lib" => dep_path.clone(),
                     _ => unimplemented!(
                         "Linker dependencies can only be libraries, yet: {}",
-                        ext.to_string_lossy()
+                        ext.to_str().expect("extension is valid UTF-8")
                     ),
                 };
                 flags.rsp_flags.push(' ');
@@ -361,7 +365,7 @@ fn main() -> anyhow::Result<()> {
     // `Z:\...` form; the rsp files themselves are still written to their /home
     // location below.
     let rsp_dir_for_ninja: std::path::PathBuf = if wine {
-        unix_to_wine(&rsp_dir.to_string_lossy()).into()
+        unix_to_wine(rsp_dir.to_str().expect("rsp dir is valid UTF-8")).into()
     } else {
         rsp_dir.clone()
     };
@@ -457,7 +461,10 @@ fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
 /// drive-rooted `Z:\home\...` form. Without the unification the path would be
 /// emitted drive-less (`\home\...`), inconsistent with every other graph path.
 fn native_to_ninja(path: &Path, wine: bool) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
+    let path = path
+        .to_str()
+        .expect("header path is valid UTF-8")
+        .replace('\\', "/");
     if wine {
         unix_to_wine(&path)
     } else {
@@ -480,7 +487,7 @@ fn wine_to_unix(p: &str) -> String {
 /// native. Used at every filesystem write/create-dir site.
 fn native_path(p: &std::path::Path, wine: bool) -> std::path::PathBuf {
     if wine {
-        wine_to_unix(&p.to_string_lossy()).into()
+        wine_to_unix(p.to_str().expect("path is valid UTF-8")).into()
     } else {
         p.to_path_buf()
     }
@@ -649,22 +656,27 @@ mod tests {
         let ninja_file = NinjaFile {
             cl: cl_flags,
             final_step: FinalStep::Lib(Flags {
-                output_file: int_dir.join("myproject.lib").to_string_lossy().into_owned(),
+                output_file: int_dir
+                    .join("myproject.lib")
+                    .to_str()
+                    .expect("path is valid UTF-8")
+                    .to_string(),
                 import_library: None,
                 flags: "@$(RspFile)".to_string(),
                 rsp_flags: String::new(),
                 files: vec![],
             }),
-            proj_dir: proj_dir.to_string_lossy().into_owned(),
+            proj_dir: proj_dir.to_str().expect("path is valid UTF-8").to_string(),
             depends_on: vec![],
         };
 
         let output = ninja_file.write("myproject", &root.join("rsp"));
         let text = output.ninja_text;
 
-        let shared = inc_dir.join("shared.h").to_string_lossy().into_owned();
-        let deep = inc_dir.join("deep.h").to_string_lossy().into_owned();
-        let dead = inc_dir.join("dead.h").to_string_lossy().into_owned();
+        let as_str = |p: PathBuf| p.to_str().expect("path is valid UTF-8").to_string();
+        let shared = as_str(inc_dir.join("shared.h"));
+        let deep = as_str(inc_dir.join("deep.h"));
+        let dead = as_str(inc_dir.join("dead.h"));
 
         assert!(text.contains(&shared), "shared.h must be an implicit input:\n{text}");
         assert!(text.contains(&deep), "deep.h (transitive) must be an implicit input:\n{text}");

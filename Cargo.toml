@@ -14,6 +14,8 @@ edition = "2024"
 single_match = "allow"
 collapsible_if = "allow"
 while_let_loop = "allow"
+# Forbid to_string_lossy (configured in clippy.toml). Use to_str().expect().
+disallowed_methods = "deny"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
