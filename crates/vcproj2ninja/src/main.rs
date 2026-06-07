@@ -449,12 +449,19 @@ fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
 
 /// Map a native filesystem path back into the build-graph path space: `Z:\...`
 /// under --wine, native otherwise — mirroring how obj/source paths are emitted.
+///
+/// These header paths come from the scanner's `Path` operations. When this
+/// binary runs as a Windows PE under Wine (the `--wine` case), those operations
+/// normalize separators to `\` and drop the leading `/`, so we unify to forward
+/// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
+/// drive-rooted `Z:\home\...` form. Without the unification the path would be
+/// emitted drive-less (`\home\...`), inconsistent with every other graph path.
 fn native_to_ninja(path: &Path, wine: bool) -> String {
-    let path = path.to_string_lossy();
+    let path = path.to_string_lossy().replace('\\', "/");
     if wine {
         unix_to_wine(&path)
     } else {
-        path.into_owned()
+        path
     }
 }
 
