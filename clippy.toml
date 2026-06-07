@@ -1,0 +1,9 @@
+# Forbid lossy Path/OsStr -> str conversions. A lossy conversion silently
+# substitutes U+FFFD for invalid UTF-8, producing a plausible-but-wrong path
+# that hides the real bug. Use `.to_str().expect("… is valid UTF-8")` instead so
+# a non-UTF-8 path fails loudly at the source. Reserve `to_string_lossy` for
+# human-facing display only (annotate those sites with #[allow]).
+disallowed-methods = [
+  { path = "std::path::Path::to_string_lossy", reason = "lossy; use to_str().expect()" },
+  { path = "std::ffi::OsStr::to_string_lossy", reason = "lossy; use to_str().expect()" },
+]
