@@ -138,6 +138,8 @@ impl NinjaFile {
                 pch_output,
                 pch_input,
                 fd_path,
+                header_deps,
+                ..
             } = group;
 
             let rsp_path = rsp_dir.join(format!("{stem}_cl_{i}.rsp"));
@@ -161,11 +163,15 @@ impl NinjaFile {
                     .map(|src| normalize_rpath(&proj_dir, src))
                     .collect();
 
-                let implicit_inputs: Vec<String> = pch_input
+                let mut implicit_inputs: Vec<String> = pch_input
                     .as_deref()
                     .map(|p| normalize_path(p.to_str().expect("pch dep is UTF-8")))
                     .into_iter()
                     .collect();
+                // Header dependencies discovered by the preprocessor: edits to
+                // any of them must force this cl group to recompile. They are
+                // already in ninja-space form (see main.rs), so pass them through.
+                implicit_inputs.extend(header_deps.iter().cloned());
 
                 let flag_str = flags
                     .flags
@@ -244,13 +250,7 @@ impl NinjaFile {
 
         // Declare one pool per unique /Fd path so parallel cl steps don't race on the PDB.
         let mut seen_pools: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for ClGroup {
-            fd_path,
-            flags: _,
-            pch_output: _,
-            pch_input: _,
-        } in cl
-        {
+        for ClGroup { fd_path, .. } in cl {
             if let Some(fd_path) = fd_path {
                 let name = fd_pool_name(fd_path);
                 if seen_pools.insert(name.clone()) {

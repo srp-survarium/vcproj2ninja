@@ -1,8 +1,10 @@
 #![feature(os_string_truncate, normalize_lexically)]
 
 mod ninja;
+mod preprocess;
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Parser;
@@ -91,6 +93,10 @@ fn main() -> anyhow::Result<()> {
     let mut ninja_files: Vec<(Uuid, String, NinjaFile)> = vec![];
     let mut guid_to_link_output: HashMap<Uuid, String> = HashMap::new();
 
+    // Preprocessor directives we don't follow, warned about once per keyword
+    // across the whole run so we can see what — if anything — we're missing.
+    let mut warned_directives: HashSet<String> = HashSet::new();
+
     for dep in deps {
         project_path.as_mut_os_string().truncate(base_len);
 
@@ -140,13 +146,78 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
 
-        let cl_flags = cl.to_flags(build_cfg, &vcproj, env);
+        let mut cl_flags = cl.to_flags(build_cfg, &vcproj, env);
 
-        let proj_dir = project_path
+        let proj_dir_native = project_path
             .parent()
             .expect("vcproj path must have a parent")
-            .to_string_lossy()
-            .into_owned();
+            .to_path_buf();
+
+        // Preprocess each cl group's sources to discover the headers they
+        // transitively include, so header edits force a recompile. The scan
+        // also collects #pragma comment(lib, ...) directives (surfaced only for
+        // now; not yet wired into the linker).
+        let mut file_cache = preprocess::FileCache::default();
+        let mut pragma_libs: Vec<String> = vec![];
+        for group in &mut cl_flags {
+            let include_dirs: Vec<PathBuf> = group
+                .include_dirs
+                .iter()
+                .map(|dir| to_native(dir, &proj_dir_native))
+                .collect();
+            let sources: Vec<PathBuf> = group
+                .flags
+                .files
+                .iter()
+                .map(|file| to_native(file, &proj_dir_native))
+                .collect();
+
+            let result = preprocess::scan_translation_units(
+                &sources,
+                &include_dirs,
+                &group.defines,
+                &mut file_cache,
+            );
+
+            for unknown in &result.unknown_directives {
+                if warned_directives.insert(unknown.keyword.clone()) {
+                    eprintln!(
+                        "warning: unhandled preprocessor directive '#{}' not followed for \
+                         header deps (first seen in {}: `{}`)",
+                        unknown.keyword,
+                        unknown.file.display(),
+                        unknown.line,
+                    );
+                }
+            }
+
+            let mut deps: Vec<String> = result
+                .headers
+                .iter()
+                .map(|header| native_to_ninja(header, wine))
+                .collect();
+            deps.sort();
+            deps.dedup();
+
+            if verbose {
+                eprintln!(
+                    "[headers][{}]: {} header dep(s) across {} source file(s)",
+                    dep.name,
+                    deps.len(),
+                    group.flags.files.len()
+                );
+            }
+
+            group.header_deps = deps;
+            pragma_libs.extend(result.pragma_libs);
+        }
+        pragma_libs.sort();
+        pragma_libs.dedup();
+        if verbose && !pragma_libs.is_empty() {
+            eprintln!("[pragma-libs][{}]: {}", dep.name, pragma_libs.join(" "));
+        }
+
+        let proj_dir = proj_dir_native.to_string_lossy().into_owned();
         // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
         // target and the base for resolving relative obj/source paths, so it
         // must agree with sln_root (Z:\...).
@@ -358,6 +429,35 @@ fn unix_to_wine(p: &str) -> String {
     }
 }
 
+/// Convert an include dir / source path as it appears in the emitted flags
+/// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
+/// native absolute filesystem path the preprocessor can actually open.
+fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
+    let replaced = raw.trim().replace('\\', "/");
+    let stripped = replaced
+        .strip_prefix("Z:")
+        .or_else(|| replaced.strip_prefix("z:"))
+        .unwrap_or(&replaced);
+    let path = Path::new(stripped);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        proj_dir.join(path)
+    };
+    joined.normalize_lexically().unwrap_or(joined)
+}
+
+/// Map a native filesystem path back into the build-graph path space: `Z:\...`
+/// under --wine, native otherwise — mirroring how obj/source paths are emitted.
+fn native_to_ninja(path: &Path, wine: bool) -> String {
+    let path = path.to_string_lossy();
+    if wine {
+        unix_to_wine(&path)
+    } else {
+        path.into_owned()
+    }
+}
+
 /// Inverse of [`unix_to_wine`]: `Z:\home\x` -> `/home/x`. Used for the few real
 /// filesystem syscalls, since Rust's std cannot open `Z:\` paths under Wine.
 fn wine_to_unix(p: &str) -> String {
@@ -447,5 +547,191 @@ fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
             return candidate;
         }
         n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ninja::{FinalStep, NinjaFile};
+    use vs2008_parser_lib::vcproj::{Flags, MsBuildEnvironment, VCProject};
+
+    /// End-to-end check of the header-dependency feature over real on-disk
+    /// files: parse a .vcproj, lower it to flags, run the preprocessor scan the
+    /// way `main` does, and confirm the transitively-included headers land in
+    /// the generated ninja text as implicit inputs — while an `#if 0` include is
+    /// pruned.
+    #[test]
+    fn header_dependencies_reach_generated_ninja() {
+        let root = std::env::temp_dir().join(format!("vc2ninja_e2e_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj_dir = root.join("proj");
+        let inc_dir = root.join("inc");
+        let int_dir = root.join("int");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::create_dir_all(&inc_dir).unwrap();
+        std::fs::create_dir_all(&int_dir).unwrap();
+
+        // main.cpp -> shared.h -> deep.h ; dead.h is behind #if 0.
+        std::fs::write(
+            proj_dir.join("main.cpp"),
+            "#include \"shared.h\"\n#if 0\n#include \"dead.h\"\n#endif\n",
+        )
+        .unwrap();
+        std::fs::write(inc_dir.join("shared.h"), "#include \"deep.h\"\n").unwrap();
+        std::fs::write(inc_dir.join("deep.h"), "// leaf\n").unwrap();
+        std::fs::write(inc_dir.join("dead.h"), "// must be pruned\n").unwrap();
+
+        let vcproj_xml = format!(
+            r#"<?xml version="1.0" encoding="Windows-1252"?>
+<VisualStudioProject ProjectType="Visual C++" Version="9,00" Name="myproject"
+    ProjectGUID="{{00000000-0000-0000-0000-000000000001}}" RootNamespace="myproject"
+    TargetFrameworkVersion="196613">
+    <Platforms><Platform Name="Win32"/></Platforms>
+    <Configurations>
+        <Configuration Name="Release|Win32" OutputDirectory="{out}"
+            IntermediateDirectory="{int}" ConfigurationType="4">
+            <Tool Name="VCCLCompilerTool" AdditionalIncludeDirectories="{inc}"/>
+            <Tool Name="VCLibrarianTool" OutputFile="{out}/myproject.lib"/>
+        </Configuration>
+    </Configurations>
+    <Files>
+        <File RelativePath=".\main.cpp"/>
+    </Files>
+</VisualStudioProject>"#,
+            out = int_dir.display(),
+            int = int_dir.display(),
+            inc = inc_dir.display(),
+        );
+
+        let vcproj = VCProject::parse_xml(&vcproj_xml).unwrap();
+        let cfg = &vcproj.configurations[0];
+        let env = MsBuildEnvironment::get(&vcproj.name, cfg, "/sln/");
+        let cl = cfg.compiler_tool.as_ref().unwrap();
+        let mut cl_flags = cl.to_flags(cfg, &vcproj, env);
+
+        // Mirror main's per-group scan (non-wine path forms).
+        let mut cache = preprocess::FileCache::default();
+        for group in &mut cl_flags {
+            let include_dirs: Vec<PathBuf> = group
+                .include_dirs
+                .iter()
+                .map(|dir| to_native(dir, &proj_dir))
+                .collect();
+            let sources: Vec<PathBuf> = group
+                .flags
+                .files
+                .iter()
+                .map(|file| to_native(file, &proj_dir))
+                .collect();
+            let result = preprocess::scan_translation_units(
+                &sources,
+                &include_dirs,
+                &group.defines,
+                &mut cache,
+            );
+            group.header_deps = result
+                .headers
+                .iter()
+                .map(|header| native_to_ninja(header, false))
+                .collect();
+            group.header_deps.sort();
+            group.header_deps.dedup();
+        }
+
+        let ninja_file = NinjaFile {
+            cl: cl_flags,
+            final_step: FinalStep::Lib(Flags {
+                output_file: int_dir.join("myproject.lib").to_string_lossy().into_owned(),
+                import_library: None,
+                flags: "@$(RspFile)".to_string(),
+                rsp_flags: String::new(),
+                files: vec![],
+            }),
+            proj_dir: proj_dir.to_string_lossy().into_owned(),
+            depends_on: vec![],
+        };
+
+        let output = ninja_file.write("myproject", &root.join("rsp"));
+        let text = output.ninja_text;
+
+        let shared = inc_dir.join("shared.h").to_string_lossy().into_owned();
+        let deep = inc_dir.join("deep.h").to_string_lossy().into_owned();
+        let dead = inc_dir.join("dead.h").to_string_lossy().into_owned();
+
+        assert!(text.contains(&shared), "shared.h must be an implicit input:\n{text}");
+        assert!(text.contains(&deep), "deep.h (transitive) must be an implicit input:\n{text}");
+        assert!(!text.contains(&dead), "dead.h behind #if 0 must be pruned:\n{text}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Discovery sweep: walk a real source tree (path from `VC2NINJA_SWEEP_DIR`)
+    /// and report every `#`-directive the preprocessor doesn't follow, ranked by
+    /// how many files contain it. Run with:
+    ///   VC2NINJA_SWEEP_DIR=/path cargo test sweep_unknown_directives -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn sweep_unknown_directives() {
+        let dir = std::env::var("VC2NINJA_SWEEP_DIR")
+            .expect("set VC2NINJA_SWEEP_DIR to a source tree");
+        let root = PathBuf::from(dir);
+
+        let mut files = Vec::new();
+        collect_sources(&root, &mut files);
+        eprintln!("scanning {} source/header files under {}", files.len(), root.display());
+
+        // keyword -> (files containing it, one sample "file: line")
+        let mut tally: HashMap<String, (usize, String)> = HashMap::new();
+        let mut cache = preprocess::FileCache::default();
+
+        for file in &files {
+            // Each file as its own root, no include dirs: we only want to
+            // classify the directives literally present in the tree.
+            let result =
+                preprocess::scan_translation_units(std::slice::from_ref(file), &[], &[], &mut cache);
+            for unknown in result.unknown_directives {
+                let entry = tally.entry(unknown.keyword).or_insert_with(|| {
+                    (0, format!("{}: {}", unknown.file.display(), unknown.line))
+                });
+                entry.0 += 1;
+            }
+        }
+
+        let mut ranked: Vec<_> = tally.into_iter().collect();
+        ranked.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+
+        eprintln!("\n=== unhandled #-directives (by file count) ===");
+        if ranked.is_empty() {
+            eprintln!("(none)");
+        }
+        for (keyword, (count, sample)) in &ranked {
+            eprintln!("  #{keyword:<14} {count:>5} file(s)   e.g. {sample}");
+        }
+    }
+
+    fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip VCS / tooling noise.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(name, ".git" | ".claude" | "target") {
+                    continue;
+                }
+                collect_sources(&path, out);
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext = ext.to_ascii_lowercase();
+                if matches!(
+                    ext.as_str(),
+                    "h" | "hpp" | "hxx" | "inl" | "cpp" | "cxx" | "cc" | "c"
+                ) {
+                    out.push(path);
+                }
+            }
+        }
     }
 }

@@ -301,6 +301,16 @@ flag_enum! {
     }
 }
 
+/// Result of lowering a single merged [`CompilerTool`] to flags, including the
+/// structured data the generator's preprocessor needs (include dirs, defines).
+pub struct ClFlags {
+    pub flags: Flags,
+    pub pch_output: Option<PathBuf>,
+    pub fd_path: Option<String>,
+    pub include_dirs: Vec<String>,
+    pub defines: Vec<String>,
+}
+
 impl CompilerTool {
     pub fn to_flags(
         &self,
@@ -345,7 +355,13 @@ impl CompilerTool {
                 env.input_name = "<poison>";
             }
 
-            let (mut flags, pch_output, fd_path) = tool.to_flags_impl(cfg, env);
+            let ClFlags {
+                mut flags,
+                pch_output,
+                fd_path,
+                include_dirs,
+                defines,
+            } = tool.to_flags_impl(cfg, env);
             flags.files = files.iter().map(|file| file.to_string()).collect();
 
             let pch_input = if pch_output.is_none()
@@ -367,17 +383,16 @@ impl CompilerTool {
                 pch_output,
                 pch_input,
                 fd_path,
+                include_dirs,
+                defines,
+                header_deps: vec![],
             });
         }
 
         result
     }
 
-    pub fn to_flags_impl(
-        &self,
-        cfg: &Configuration,
-        env: MsBuildEnvironment,
-    ) -> (Flags, Option<PathBuf>, Option<String>) {
+    pub fn to_flags_impl(&self, cfg: &Configuration, env: MsBuildEnvironment) -> ClFlags {
         let Self {
             additional_options,
             optimization,
@@ -538,12 +553,16 @@ impl CompilerTool {
             ]
         );
 
+        // Resolved include search dirs, surfaced for the generator's preprocessor.
+        let mut include_dirs: Vec<String> = vec![];
         for include_directory in additional_include_directories
             .iter()
             .filter(|s| !s.is_empty())
         {
             let include_directory = env.expand(include_directory.trim());
             let include_directory = include_directory.trim().trim_matches('"');
+
+            include_dirs.push(include_directory.to_string());
 
             // TODO: This needs proper handling
             if include_directory.ends_with('\\') {
@@ -572,6 +591,12 @@ impl CompilerTool {
             preprocessor_definitions
         };
 
+        // Surface the raw defines for the generator's preprocessor (`#if`/`#ifdef`).
+        let defines: Vec<String> = preprocessor_definitions
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect();
         for preprocessor_definition in preprocessor_definitions.iter().filter(|s| !s.is_empty()) {
             rsp_flags.push(format!("/D \"{preprocessor_definition}\""));
         }
@@ -665,8 +690,8 @@ impl CompilerTool {
         {
             rsp_flags.push(additional_options.clone());
         }
-        (
-            Flags {
+        ClFlags {
+            flags: Flags {
                 output_file,
                 import_library: None,
                 flags: "@$(RspFile) /nologo /errorReport:prompt".to_string(),
@@ -675,7 +700,9 @@ impl CompilerTool {
             },
             pch_output,
             fd_path,
-        )
+            include_dirs,
+            defines,
+        }
     }
 
     fn parse_files<'a>(

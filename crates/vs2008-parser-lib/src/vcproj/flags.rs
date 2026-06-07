@@ -67,4 +67,15 @@ pub struct ClGroup {
     /// Used as the ninja pool key to prevent parallel PDB writes.
     /// `None` when the project does not write a PDB (no `/Fd` flag).
     pub fd_path: Option<String>,
+
+    /// Expanded `/I` include search directories (same path form as the emitted
+    /// flags). Consumed by the generator's preprocessor to resolve `#include`s.
+    pub include_dirs: Vec<String>,
+    /// Preprocessor `/D` definitions (raw `NAME` or `NAME=VALUE`). Used to
+    /// evaluate `#if`/`#ifdef` while scanning for header dependencies.
+    pub defines: Vec<String>,
+    /// Transitively-included header files, in ninja-space paths, attached as
+    /// implicit inputs so header edits force a recompile. Empty until the
+    /// generator fills it in (it owns the filesystem/path-form knowledge).
+    pub header_deps: Vec<String>,
 }
