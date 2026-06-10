@@ -1,5 +1,6 @@
 #![feature(os_string_truncate, normalize_lexically)]
 
+mod compdb;
 mod ninja;
 mod preprocess;
 
@@ -47,6 +48,28 @@ pub struct Cli {
     /// paths, since Rust's std cannot open `Z:\` paths under Wine.
     #[arg(long)]
     pub wine: bool,
+
+    /// Output backend: `wine` (default) writes the ninja build graph;
+    /// `clangd` writes compile_commands.json (clang-cl flavor, native paths)
+    /// into the output dir instead - the output dir is NOT cleared.
+    #[arg(long, value_enum, default_value_t = Target::Wine)]
+    pub target: Target,
+
+    /// (--target clangd) System include dir, emitted as `-imsvc<dir>`
+    /// (VC8 CRT, WinSDK). Repeatable.
+    #[arg(long)]
+    pub imsvc: Vec<String>,
+
+    /// (--target clangd) Extra argument appended verbatim to every entry
+    /// (VFS overlay, _STLP_NATIVE_INCLUDE_PATH define, ...). Repeatable.
+    #[arg(long)]
+    pub extra_arg: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum Target {
+    Wine,
+    Clangd,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -57,6 +80,9 @@ fn main() -> anyhow::Result<()> {
         output_dir,
         verbose,
         wine,
+        target,
+        imsvc,
+        extra_arg,
     } = Cli::parse();
 
     let sln = std::fs::read_to_string(&sln_path)
@@ -225,7 +251,11 @@ fn main() -> anyhow::Result<()> {
         // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
         // target and the base for resolving relative obj/source paths, so it
         // must agree with sln_root (Z:\...).
-        let proj_dir = if wine { unix_to_wine(&proj_dir) } else { proj_dir };
+        let proj_dir = if wine {
+            unix_to_wine(&proj_dir)
+        } else {
+            proj_dir
+        };
 
         let final_step = match build_cfg.configuration_type {
             ConfigurationType::_4 => {
@@ -348,6 +378,17 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // --target clangd: emit the compilation database and stop. The ninja
+    // backend's output dir handling (clear + rsp tree) is not wanted here.
+    if target == Target::Clangd {
+        std::fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Creating output dir '{}'", output_dir.display()))?;
+        let out_path = output_dir.join("compile_commands.json");
+        let n = compdb::write_compile_commands(&ninja_files, &out_path, &imsvc, &extra_arg)?;
+        println!("Wrote {n} compile command(s) to '{}'", out_path.display());
+        return Ok(());
+    }
+
     // Phase 2: clear and recreate the output directory.
     if output_dir.exists() {
         std::fs::remove_dir_all(&output_dir)
@@ -465,11 +506,7 @@ fn native_to_ninja(path: &Path, wine: bool) -> String {
         .to_str()
         .expect("header path is valid UTF-8")
         .replace('\\', "/");
-    if wine {
-        unix_to_wine(&path)
-    } else {
-        path
-    }
+    if wine { unix_to_wine(&path) } else { path }
 }
 
 /// Inverse of [`unix_to_wine`]: `Z:\home\x` -> `/home/x`. Used for the few real
@@ -526,7 +563,10 @@ fn collect_transitive_deps(
         // that are built /MD and reference msvcrt imports (e.g. __imp__vsnprintf_s)
         // -> unresolved against the /MT exe (which excludes msvcrt). VS never links
         // these into the exe.
-        let is_static_lib = guid_to_is_static_lib.get(&dep.uuid).copied().unwrap_or(false);
+        let is_static_lib = guid_to_is_static_lib
+            .get(&dep.uuid)
+            .copied()
+            .unwrap_or(false);
         if is_static_lib {
             collect_transitive_deps(
                 dep.uuid,
@@ -678,9 +718,18 @@ mod tests {
         let deep = as_str(inc_dir.join("deep.h"));
         let dead = as_str(inc_dir.join("dead.h"));
 
-        assert!(text.contains(&shared), "shared.h must be an implicit input:\n{text}");
-        assert!(text.contains(&deep), "deep.h (transitive) must be an implicit input:\n{text}");
-        assert!(!text.contains(&dead), "dead.h behind #if 0 must be pruned:\n{text}");
+        assert!(
+            text.contains(&shared),
+            "shared.h must be an implicit input:\n{text}"
+        );
+        assert!(
+            text.contains(&deep),
+            "deep.h (transitive) must be an implicit input:\n{text}"
+        );
+        assert!(
+            !text.contains(&dead),
+            "dead.h behind #if 0 must be pruned:\n{text}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -692,13 +741,17 @@ mod tests {
     #[test]
     #[ignore]
     fn sweep_unknown_directives() {
-        let dir = std::env::var("VC2NINJA_SWEEP_DIR")
-            .expect("set VC2NINJA_SWEEP_DIR to a source tree");
+        let dir =
+            std::env::var("VC2NINJA_SWEEP_DIR").expect("set VC2NINJA_SWEEP_DIR to a source tree");
         let root = PathBuf::from(dir);
 
         let mut files = Vec::new();
         collect_sources(&root, &mut files);
-        eprintln!("scanning {} source/header files under {}", files.len(), root.display());
+        eprintln!(
+            "scanning {} source/header files under {}",
+            files.len(),
+            root.display()
+        );
 
         // keyword -> (files containing it, one sample "file: line")
         let mut tally: HashMap<String, (usize, String)> = HashMap::new();
@@ -707,8 +760,12 @@ mod tests {
         for file in &files {
             // Each file as its own root, no include dirs: we only want to
             // classify the directives literally present in the tree.
-            let result =
-                preprocess::scan_translation_units(std::slice::from_ref(file), &[], &[], &mut cache);
+            let result = preprocess::scan_translation_units(
+                std::slice::from_ref(file),
+                &[],
+                &[],
+                &mut cache,
+            );
             for unknown in result.unknown_directives {
                 let entry = tally.entry(unknown.keyword).or_insert_with(|| {
                     (0, format!("{}: {}", unknown.file.display(), unknown.line))
@@ -718,7 +775,7 @@ mod tests {
         }
 
         let mut ranked: Vec<_> = tally.into_iter().collect();
-        ranked.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+        ranked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
 
         eprintln!("\n=== unhandled #-directives (by file count) ===");
         if ranked.is_empty() {

@@ -160,7 +160,7 @@ impl NinjaFile {
                 let inputs: Vec<String> = flags
                     .files
                     .iter()
-                    .map(|src| normalize_rpath(&proj_dir, src))
+                    .map(|src| normalize_rpath(proj_dir, src))
                     .collect();
 
                 let mut implicit_inputs: Vec<String> = pch_input
@@ -205,11 +205,7 @@ impl NinjaFile {
             FinalStep::Lib(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_lib.rsp"));
                 statements.push(build_final_statement(
-                    "lib",
-                    flags,
-                    &rsp_path,
-                    &proj_dir,
-                    &depends_on,
+                    "lib", flags, &rsp_path, proj_dir, depends_on,
                 ));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
@@ -217,11 +213,7 @@ impl NinjaFile {
             FinalStep::Link(flags) => {
                 let rsp_path = rsp_dir.join(format!("{stem}_link.rsp"));
                 statements.push(build_final_statement(
-                    "link",
-                    flags,
-                    &rsp_path,
-                    &proj_dir,
-                    &depends_on,
+                    "link", flags, &rsp_path, proj_dir, depends_on,
                 ));
                 rsp_files.push((rsp_path, flags.rsp_file_content()));
                 &flags.output_file
