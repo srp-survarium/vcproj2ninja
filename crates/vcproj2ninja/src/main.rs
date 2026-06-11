@@ -13,7 +13,7 @@ use clap::Parser;
 use uuid::Uuid;
 
 use ninja::{FinalStep, NinjaFile};
-use utils::{resolve_host, to_graph, to_host};
+use utils::{to_graph, to_host, to_host_normalized};
 use vs2008_parser_lib::vcproj::{ConfigurationType, Flags, MsBuildEnvironment};
 use vs2008_parser_lib::{sln, vcproj};
 
@@ -187,13 +187,13 @@ fn main() -> anyhow::Result<()> {
             let include_dirs: Vec<PathBuf> = group
                 .include_dirs
                 .iter()
-                .map(|dir| resolve_host(dir, &proj_dir_native))
+                .map(|dir| to_host_normalized(dir, &proj_dir_native))
                 .collect();
             let sources: Vec<PathBuf> = group
                 .flags
                 .files
                 .iter()
-                .map(|file| resolve_host(file, &proj_dir_native))
+                .map(|file| to_host_normalized(file, &proj_dir_native))
                 .collect();
 
             let result = preprocess::scan_translation_units(
@@ -529,7 +529,7 @@ mod tests {
     use super::*;
     use ninja::{FinalStep, NinjaFile};
     use std::path::Path;
-    use utils::{resolve_host, to_graph, to_host};
+    use utils::{to_graph, to_host, to_host_normalized};
     use vs2008_parser_lib::vcproj::{Flags, MsBuildEnvironment, VCProject};
 
     /// End-to-end check of the header-dependency feature over real on-disk
@@ -592,13 +592,13 @@ mod tests {
             let include_dirs: Vec<PathBuf> = group
                 .include_dirs
                 .iter()
-                .map(|dir| resolve_host(dir, &proj_dir))
+                .map(|dir| to_host_normalized(dir, &proj_dir))
                 .collect();
             let sources: Vec<PathBuf> = group
                 .flags
                 .files
                 .iter()
-                .map(|file| resolve_host(file, &proj_dir))
+                .map(|file| to_host_normalized(file, &proj_dir))
                 .collect();
             let result = preprocess::scan_translation_units(
                 &sources,

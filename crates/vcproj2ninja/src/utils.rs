@@ -60,7 +60,7 @@ pub fn to_graph(path: &Path, wine: bool) -> String {
 /// Convert an include dir / source path as it appears in the emitted flags
 /// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
 /// native absolute filesystem path the preprocessor can actually open.
-pub fn resolve_host(raw: &str, proj_dir: &Path) -> PathBuf {
+pub fn to_host_normalized(raw: &str, proj_dir: &Path) -> PathBuf {
     let host = wine_to_unix(raw.trim());
     let path = Path::new(&host);
     let joined = if path.is_absolute() {
