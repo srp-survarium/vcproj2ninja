@@ -68,7 +68,9 @@ const COMPAT_TAIL: &[&str] = &[
     // The MSVC8-dialect errors clang cannot be talked out of (plus their
     // knock-on conversion errors) exceed the default ~20 error limit, which
     // ABORTS the parse mid-TU and loses the AST below the abort point.
-    // (bare spelling: clang-cl passes -f flags through; /clang: drops some)
+    // (bare spelling: clang-cl passes -f flags through; /clang: drops some).
+    // clangd itself MANGLES this away from compdb commands - the consuming
+    // repo's .clangd must also carry `CompileFlags: Add: [-ferror-limit=0]`.
     // Unlimited keeps recovery going to the end of every TU.
     "-ferror-limit=0",
 ];
