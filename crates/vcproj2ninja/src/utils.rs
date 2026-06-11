@@ -40,23 +40,6 @@ pub fn to_host(p: &Path, wine: bool) -> PathBuf {
     }
 }
 
-/// Path form written into the emitted ninja graph: `Z:\...` under --wine
-/// under --wine, native otherwise — mirroring how obj/source paths are emitted.
-///
-/// These header paths come from the scanner's `Path` operations. When this
-/// binary runs as a Windows PE under Wine (the `--wine` case), those operations
-/// normalize separators to `\` and drop the leading `/`, so we unify to forward
-/// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
-/// drive-rooted `Z:\home\...` form. Without the unification the path would be
-/// emitted drive-less (`\home\...`), inconsistent with every other graph path.
-pub fn to_ninja_path(path: &Path, wine: bool) -> String {
-    let path = path
-        .to_str()
-        .expect("header path is valid UTF-8")
-        .replace('\\', "/");
-    if wine { unix_to_wine(&path) } else { path }
-}
-
 /// Convert an include dir / source path as it appears in the emitted flags
 /// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
 /// native absolute filesystem path the preprocessor can actually open.
@@ -69,6 +52,19 @@ pub fn to_host_normalized(raw: &str, proj_dir: &Path) -> PathBuf {
         proj_dir.join(path)
     };
     joined.normalize_lexically().unwrap_or(joined)
+}
+
+/// Path form written into the emitted ninja graph: `Z:\...` under --wine,
+/// native otherwise.
+///
+/// Separators are unified to `/` first: under Wine, `Path` ops yield `\` and a
+/// drive-less root, which `unix_to_wine` could not lift.
+pub fn to_ninja_path(path: &Path, wine: bool) -> String {
+    let path = path
+        .to_str()
+        .expect("header path is valid UTF-8")
+        .replace('\\', "/");
+    if wine { unix_to_wine(&path) } else { path }
 }
 
 #[cfg(test)]
