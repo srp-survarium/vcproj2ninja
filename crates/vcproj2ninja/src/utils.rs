@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// Lift a native Linux path to the drive-rooted form Wine exposes: the Linux
 /// root `/` is mounted at drive `Z:`, so `/home/x` -> `Z:\home\x`. Non-absolute
 /// inputs are returned unchanged.
-pub fn unix_to_wine(p: &str) -> String {
+fn unix_to_wine(p: &str) -> String {
     if p.starts_with('/') {
         format!("Z:{}", p.replace('/', "\\"))
     } else {
@@ -27,12 +27,12 @@ fn wine_to_unix(p: &str) -> String {
 
 /// Host form of a path string: lowered from the Wine view under `--wine`,
 /// untouched on Windows (drive-rooted paths must stay drive-rooted).
-pub fn host_path(p: &str, wine: bool) -> String {
+pub fn to_host_str(p: &str, wine: bool) -> String {
     if wine { wine_to_unix(p) } else { p.to_string() }
 }
 
-/// [`host_path`] for `Path` values.
-pub fn native_path(p: &Path, wine: bool) -> PathBuf {
+/// [`to_host_str`] for `Path` values.
+pub fn to_host(p: &Path, wine: bool) -> PathBuf {
     if wine {
         wine_to_unix(p.to_str().expect("path is valid UTF-8")).into()
     } else {
@@ -49,7 +49,7 @@ pub fn native_path(p: &Path, wine: bool) -> PathBuf {
 /// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
 /// drive-rooted `Z:\home\...` form. Without the unification the path would be
 /// emitted drive-less (`\home\...`), inconsistent with every other graph path.
-pub fn native_to_ninja(path: &Path, wine: bool) -> String {
+pub fn to_graph(path: &Path, wine: bool) -> String {
     let path = path
         .to_str()
         .expect("header path is valid UTF-8")
@@ -60,7 +60,7 @@ pub fn native_to_ninja(path: &Path, wine: bool) -> String {
 /// Convert an include dir / source path as it appears in the emitted flags
 /// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
 /// native absolute filesystem path the preprocessor can actually open.
-pub fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
+pub fn resolve_host(raw: &str, proj_dir: &Path) -> PathBuf {
     let replaced = raw.trim().replace('\\', "/");
     let stripped = replaced
         .strip_prefix("Z:")
@@ -102,11 +102,11 @@ mod tests {
     }
 
     #[test]
-    fn host_path_is_untouched_on_windows() {
+    fn to_host_str_is_untouched_on_windows() {
         assert_eq!(
-            host_path("C:\\Projects\\vostok", false),
+            to_host_str("C:\\Projects\\vostok", false),
             "C:\\Projects\\vostok"
         );
-        assert_eq!(host_path("Z:\\home\\x", true), "/home/x");
+        assert_eq!(to_host_str("Z:\\home\\x", true), "/home/x");
     }
 }

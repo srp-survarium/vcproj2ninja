@@ -27,7 +27,7 @@ use nom::{
 };
 
 use crate::ninja::NinjaFile;
-use crate::utils::host_path;
+use crate::utils::to_host_str;
 
 /// Flags that only affect codegen/PDB/PCH output - meaningless or harmful for
 /// a syntax-only clang view. Matched by prefix against the token (so the
@@ -119,7 +119,7 @@ fn translate_flags(rsp_flags: &str, wine: bool) -> Vec<String> {
     let mut args = vec![];
     for arg in parsed {
         match arg {
-            ClArg::Include(dir) => args.push(format!("/I{}", host_path(&dir, wine))),
+            ClArg::Include(dir) => args.push(format!("/I{}", to_host_str(&dir, wine))),
             ClArg::Define(def) => args.push(format!("/D{def}")),
             ClArg::Other(t) => {
                 if DROP_PREFIXES.iter().any(|p| t.starts_with(p)) {
@@ -143,7 +143,7 @@ fn include_env_dirs(wine: bool) -> Vec<String> {
         .unwrap_or_default()
         .split(';')
         .filter(|d| !d.trim().is_empty())
-        .map(|d| host_path(d, wine))
+        .map(|d| to_host_str(d, wine))
         .collect()
 }
 
@@ -264,11 +264,11 @@ pub fn write_compile_commands(
     let mut out = String::from("[\n");
 
     for (_guid, _name, nf) in ninja_files {
-        let dir = host_path(&nf.proj_dir, wine);
+        let dir = to_host_str(&nf.proj_dir, wine);
         for group in &nf.cl {
             let flags = translate_flags(&group.flags.rsp_flags, wine);
             for src in &group.flags.files {
-                let src = host_path(src, wine);
+                let src = to_host_str(src, wine);
                 let src = src.trim_start_matches("./");
                 let file = if src.starts_with('/') {
                     src.to_string()

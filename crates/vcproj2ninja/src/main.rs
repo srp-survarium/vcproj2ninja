@@ -13,7 +13,7 @@ use clap::Parser;
 use uuid::Uuid;
 
 use ninja::{FinalStep, NinjaFile};
-use utils::{native_path, native_to_ninja, to_native, unix_to_wine};
+use utils::{resolve_host, to_graph, to_host};
 use vs2008_parser_lib::vcproj::{ConfigurationType, Flags, MsBuildEnvironment};
 use vs2008_parser_lib::{sln, vcproj};
 
@@ -108,12 +108,7 @@ fn main() -> anyhow::Result<()> {
     // path. In --wine mode lift it to the drive-rooted `Z:\...` form so the
     // (Windows-target) arithmetic is correct; `project_path` above keeps the
     // native `/home/...` form for the actual `.vcproj` reads.
-    let sln_root_str = sln_root.to_str().expect("sln dir is valid UTF-8");
-    let mut sln_root = if wine {
-        unix_to_wine(sln_root_str)
-    } else {
-        sln_root_str.to_string()
-    };
+    let mut sln_root = to_graph(&sln_root, wine);
     sln_root.push('\\');
 
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
@@ -192,13 +187,13 @@ fn main() -> anyhow::Result<()> {
             let include_dirs: Vec<PathBuf> = group
                 .include_dirs
                 .iter()
-                .map(|dir| to_native(dir, &proj_dir_native))
+                .map(|dir| resolve_host(dir, &proj_dir_native))
                 .collect();
             let sources: Vec<PathBuf> = group
                 .flags
                 .files
                 .iter()
-                .map(|file| to_native(file, &proj_dir_native))
+                .map(|file| resolve_host(file, &proj_dir_native))
                 .collect();
 
             let result = preprocess::scan_translation_units(
@@ -223,7 +218,7 @@ fn main() -> anyhow::Result<()> {
             let mut deps: Vec<String> = result
                 .headers
                 .iter()
-                .map(|header| native_to_ninja(header, wine))
+                .map(|header| to_graph(header, wine))
                 .collect();
             deps.sort();
             deps.dedup();
@@ -246,18 +241,10 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[pragma-libs][{}]: {}", dep.name, pragma_libs.join(" "));
         }
 
-        let proj_dir = proj_dir_native
-            .to_str()
-            .expect("project dir is valid UTF-8")
-            .to_string();
         // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
         // target and the base for resolving relative obj/source paths, so it
         // must agree with sln_root (Z:\...).
-        let proj_dir = if wine {
-            unix_to_wine(&proj_dir)
-        } else {
-            proj_dir
-        };
+        let proj_dir = to_graph(&proj_dir_native, wine);
 
         let final_step = match build_cfg.configuration_type {
             ConfigurationType::_4 => {
@@ -409,11 +396,7 @@ fn main() -> anyhow::Result<()> {
     // command lines, which run under Wine. In --wine mode pass the drive-rooted
     // `Z:\...` form; the rsp files themselves are still written to their /home
     // location below.
-    let rsp_dir_for_ninja: std::path::PathBuf = if wine {
-        unix_to_wine(rsp_dir.to_str().expect("rsp dir is valid UTF-8")).into()
-    } else {
-        rsp_dir.clone()
-    };
+    let rsp_dir_for_ninja: std::path::PathBuf = to_graph(&rsp_dir, wine).into();
 
     // Phase 3: assign unique filenames and write.
     let mut used: HashSet<String> = HashSet::new();
@@ -431,7 +414,7 @@ fn main() -> anyhow::Result<()> {
         for (rsp_path, rsp_content) in output.rsp_files {
             // rsp_path came back in the `Z:\...` form we passed in; write the file
             // to its native /home location.
-            let rsp_path = native_path(&rsp_path, wine);
+            let rsp_path = to_host(&rsp_path, wine);
             std::fs::write(&rsp_path, &rsp_content)
                 .with_context(|| format!("Failed to write '{}'", rsp_path.display()))?;
         }
@@ -444,7 +427,7 @@ fn main() -> anyhow::Result<()> {
     // are `Z:\...` strings. This binary can't create those under Wine, so map
     // back to the native `/home/...` path for the syscall.
     for dir in &all_required_dirs {
-        let dir = native_path(dir, wine);
+        let dir = to_host(dir, wine);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Creating required directory '{}'", dir.display()))?;
     }
@@ -546,7 +529,7 @@ mod tests {
     use super::*;
     use ninja::{FinalStep, NinjaFile};
     use std::path::Path;
-    use utils::{native_path, native_to_ninja, to_native, unix_to_wine};
+    use utils::{resolve_host, to_graph, to_host};
     use vs2008_parser_lib::vcproj::{Flags, MsBuildEnvironment, VCProject};
 
     /// End-to-end check of the header-dependency feature over real on-disk
@@ -609,13 +592,13 @@ mod tests {
             let include_dirs: Vec<PathBuf> = group
                 .include_dirs
                 .iter()
-                .map(|dir| to_native(dir, &proj_dir))
+                .map(|dir| resolve_host(dir, &proj_dir))
                 .collect();
             let sources: Vec<PathBuf> = group
                 .flags
                 .files
                 .iter()
-                .map(|file| to_native(file, &proj_dir))
+                .map(|file| resolve_host(file, &proj_dir))
                 .collect();
             let result = preprocess::scan_translation_units(
                 &sources,
@@ -626,7 +609,7 @@ mod tests {
             group.header_deps = result
                 .headers
                 .iter()
-                .map(|header| native_to_ninja(header, false))
+                .map(|header| to_graph(header, false))
                 .collect();
             group.header_deps.sort();
             group.header_deps.dedup();
