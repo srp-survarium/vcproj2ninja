@@ -40,7 +40,7 @@ pub fn to_host(p: &Path, wine: bool) -> PathBuf {
     }
 }
 
-/// Map a native filesystem path back into the build-graph path space: `Z:\...`
+/// Path form written into the emitted ninja graph: `Z:\...` under --wine
 /// under --wine, native otherwise — mirroring how obj/source paths are emitted.
 ///
 /// These header paths come from the scanner's `Path` operations. When this
@@ -49,7 +49,7 @@ pub fn to_host(p: &Path, wine: bool) -> PathBuf {
 /// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
 /// drive-rooted `Z:\home\...` form. Without the unification the path would be
 /// emitted drive-less (`\home\...`), inconsistent with every other graph path.
-pub fn to_graph(path: &Path, wine: bool) -> String {
+pub fn to_ninja_path(path: &Path, wine: bool) -> String {
     let path = path
         .to_str()
         .expect("header path is valid UTF-8")
