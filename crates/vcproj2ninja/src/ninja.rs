@@ -172,6 +172,15 @@ impl NinjaFile {
                 // any of them must force this cl group to recompile. They are
                 // already in ninja-space form (see main.rs), so pass them through.
                 implicit_inputs.extend(header_deps.iter().cloned());
+                // The group's flags live in the rsp, but the command line only
+                // embeds the @path - ninja's command hash misses rsp content
+                // changes, so depend on the file itself.
+                implicit_inputs.push(
+                    rsp_path
+                        .to_str()
+                        .expect("rsp path is valid UTF-8")
+                        .to_string(),
+                );
 
                 let flag_str = flags
                     .flags
@@ -363,6 +372,16 @@ fn build_final_statement(
         .flags
         .replace("$(RspFile)", rsp_path.to_str().unwrap());
 
+    let mut implicit_inputs: Vec<String> = depends_on.iter().map(|d| normalize_path(d)).collect();
+    // Same rsp-content blindness as the cl edges: the lib/link flags live in
+    // the rsp, the command only embeds the @path.
+    implicit_inputs.push(
+        rsp_path
+            .to_str()
+            .expect("rsp path is valid UTF-8")
+            .to_string(),
+    );
+
     NinjaBuildStatement {
         outputs,
         implicit_outputs: vec![],
@@ -372,7 +391,7 @@ fn build_final_statement(
             .iter()
             .map(|f| normalize_rpath(proj_dir, f))
             .collect(),
-        implicit_inputs: depends_on.iter().map(|d| normalize_path(d)).collect(),
+        implicit_inputs,
         order_only_deps: vec![],
         flags: Some(flag_str),
         pool: None,
