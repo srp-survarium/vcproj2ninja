@@ -199,7 +199,7 @@ fn write_vfs_overlay(
                 contents,
                 "{{\"name\": \"{}\", \"type\": \"file\", \"external-contents\": \"{}\"}}",
                 json_escape(name),
-                json_escape(path.to_str().unwrap_or_default()),
+                json_escape(path.to_str().expect("overlay file path is valid UTF-8")),
             )?;
             nfiles += 1;
         }
@@ -210,7 +210,7 @@ fn write_vfs_overlay(
             write!(
                 out,
                 "{{\"name\": \"{}\", \"type\": \"directory\", \"contents\": [{contents}]}}",
-                json_escape(dir.to_str().unwrap_or_default()),
+                json_escape(dir.to_str().expect("overlay dir path is valid UTF-8")),
             )?;
             ndirs += 1;
         }
@@ -256,7 +256,7 @@ pub fn write_compile_commands(
         );
         derived.push(format!(
             "/clang:-ivfsoverlay{}",
-            overlay_path.to_str().unwrap_or_default()
+            overlay_path.to_str().expect("overlay path is valid UTF-8")
         ));
     }
 
