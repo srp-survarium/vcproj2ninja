@@ -61,12 +61,8 @@ pub fn to_graph(path: &Path, wine: bool) -> String {
 /// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
 /// native absolute filesystem path the preprocessor can actually open.
 pub fn resolve_host(raw: &str, proj_dir: &Path) -> PathBuf {
-    let replaced = raw.trim().replace('\\', "/");
-    let stripped = replaced
-        .strip_prefix("Z:")
-        .or_else(|| replaced.strip_prefix("z:"))
-        .unwrap_or(&replaced);
-    let path = Path::new(stripped);
+    let host = wine_to_unix(raw.trim());
+    let path = Path::new(&host);
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
