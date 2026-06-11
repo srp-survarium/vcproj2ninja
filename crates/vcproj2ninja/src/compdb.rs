@@ -52,8 +52,6 @@ const DROP_PREFIXES: &[&str] = &[
 ];
 
 /// Fixed clang-cl compatibility tail (see vostok docs: clangd spike notes).
-/// `-imsvc` MUST stay a clang-cl-mode argument: forwarded through `/clang:` the
-/// gcc-mode driver silently drops it.
 const COMPAT_TAIL: &[&str] = &[
     // Impersonate cl 14.00 (VS2005/MSVC8): _MSC_VER=1400, so every
     // `#if _MSC_VER` branch in stlport/boost/engine resolves as it did
@@ -61,7 +59,7 @@ const COMPAT_TAIL: &[&str] = &[
     "-fms-compatibility-version=14.00",
     "/clang:--target=i686-pc-windows-msvc",
     "/clang:-std=c++98",
-    // Remove default clangd diagnostic, since it is a non warning for MSVC.
+    // Remove default clangd diagnostic since it is a non warning for MSVC.
     // e.g. weapon_ammunition.h passes a `mutable_buffer` through a printf-style
     // `...` - MSVC8 byte-copies the object, clang errors by default.
     "-Wno-non-pod-varargs",
