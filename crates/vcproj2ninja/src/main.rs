@@ -1,16 +1,19 @@
 #![feature(os_string_truncate, normalize_lexically)]
 
+mod compdb;
 mod ninja;
 mod preprocess;
+mod utils;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
 use uuid::Uuid;
 
 use ninja::{FinalStep, NinjaFile};
+use utils::{to_host, to_host_normalized, to_ninja_path};
 use vs2008_parser_lib::vcproj::{ConfigurationType, Flags, MsBuildEnvironment};
 use vs2008_parser_lib::{sln, vcproj};
 
@@ -35,18 +38,41 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    /// Generate a build graph for running ninja.exe/cl.exe under Wine on Linux.
+    /// Run the generated/consuming tools under Wine on Linux (affects HOW
+    /// paths are computed, not WHAT is generated - combine with any --target).
     ///
     /// This binary is a Windows .exe run under Wine, fed native Linux paths.
     /// Windows path arithmetic (normalize/pathdiff) only behaves correctly on
     /// *drive-rooted* paths; on drive-less `/home/...` it misfires. Under Wine
     /// the Linux root is mounted at drive `Z:`, so with `--wine` we lift the
-    /// arithmetic roots (`sln_path`'s dir and each project dir) to `Z:\...` so
-    /// every emitted build-graph path comes out `Z:\...` (what ninja/cl resolve).
-    /// The actual filesystem reads/writes still use the original `/home/...`
+    /// arithmetic roots (`sln_path`'s dir and each project dir) to `Z:\...`.
+    /// For `--target ninja` the emitted graph keeps the `Z:\...` form (what
+    /// ninja/cl resolve under Wine); for `--target clangd` the arithmetic
+    /// result is lowered back to `/...` at emission (clangd runs natively).
+    /// The actual filesystem reads/writes always use the original `/home/...`
     /// paths, since Rust's std cannot open `Z:\` paths under Wine.
     #[arg(long)]
     pub wine: bool,
+
+    /// WHAT to generate: `ninja` (default) - the build graph + rsp files;
+    /// `clangd` - compile_commands.json (clang-cl flavor) into the output
+    /// dir instead (the output dir is NOT cleared in this mode).
+    #[arg(long, value_enum, default_value_t = Target::Ninja)]
+    pub target: Target,
+
+    /// (--target clangd) Optional escape hatch: extra argument appended
+    /// verbatim to every entry. System include dirs, the stlport pin and the
+    /// VFS overlay are derived from the environment - nothing is required.
+    #[arg(long)]
+    pub extra_arg: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum Target {
+    /// Ninja build graph + rsp files.
+    Ninja,
+    /// compile_commands.json for clangd.
+    Clangd,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -57,7 +83,16 @@ fn main() -> anyhow::Result<()> {
         output_dir,
         verbose,
         wine,
+        target,
+        extra_arg,
     } = Cli::parse();
+
+    // All emitted paths derive from the sln dir; a relative --sln-path would
+    // make them relative to the caller's cwd (clangd then silently falls back
+    // to a generic command for every file). Absolutize lexically - canonicalize
+    // would resolve symlinks and change path spellings (NixOS /home links).
+    let sln_path = std::path::absolute(&sln_path)
+        .with_context(|| format!("Absolutizing sln path '{}'", sln_path.display()))?;
 
     let sln = std::fs::read_to_string(&sln_path)
         .with_context(|| format!("Reading sln '{}'", sln_path.display()))?;
@@ -80,12 +115,7 @@ fn main() -> anyhow::Result<()> {
     // path. In --wine mode lift it to the drive-rooted `Z:\...` form so the
     // (Windows-target) arithmetic is correct; `project_path` above keeps the
     // native `/home/...` form for the actual `.vcproj` reads.
-    let sln_root_str = sln_root.to_str().expect("sln dir is valid UTF-8");
-    let mut sln_root = if wine {
-        unix_to_wine(sln_root_str)
-    } else {
-        sln_root_str.to_string()
-    };
+    let mut sln_root = to_ninja_path(&sln_root, wine);
     sln_root.push('\\');
 
     let base_len = project_path.as_os_str().as_encoded_bytes().len();
@@ -164,13 +194,13 @@ fn main() -> anyhow::Result<()> {
             let include_dirs: Vec<PathBuf> = group
                 .include_dirs
                 .iter()
-                .map(|dir| to_native(dir, &proj_dir_native))
+                .map(|dir| to_host_normalized(dir, &proj_dir_native))
                 .collect();
             let sources: Vec<PathBuf> = group
                 .flags
                 .files
                 .iter()
-                .map(|file| to_native(file, &proj_dir_native))
+                .map(|file| to_host_normalized(file, &proj_dir_native))
                 .collect();
 
             let result = preprocess::scan_translation_units(
@@ -195,7 +225,7 @@ fn main() -> anyhow::Result<()> {
             let mut deps: Vec<String> = result
                 .headers
                 .iter()
-                .map(|header| native_to_ninja(header, wine))
+                .map(|header| to_ninja_path(header, wine))
                 .collect();
             deps.sort();
             deps.dedup();
@@ -218,14 +248,10 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[pragma-libs][{}]: {}", dep.name, pragma_libs.join(" "));
         }
 
-        let proj_dir = proj_dir_native
-            .to_str()
-            .expect("project dir is valid UTF-8")
-            .to_string();
         // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
         // target and the base for resolving relative obj/source paths, so it
         // must agree with sln_root (Z:\...).
-        let proj_dir = if wine { unix_to_wine(&proj_dir) } else { proj_dir };
+        let proj_dir = to_ninja_path(&proj_dir_native, wine);
 
         let final_step = match build_cfg.configuration_type {
             ConfigurationType::_4 => {
@@ -348,6 +374,19 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // --target clangd: emit the compilation database and stop. The ninja
+    // backend's output dir handling (clear + rsp tree) is not wanted here.
+    if target == Target::Clangd {
+        std::fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Creating output dir '{}'", output_dir.display()))?;
+        let out_path = output_dir.join("compile_commands.json");
+        let source_root = sln_path.parent().context("Sln path must have a parent")?;
+        let n =
+            compdb::write_compile_commands(&ninja_files, &out_path, source_root, wine, &extra_arg)?;
+        println!("Wrote {n} compile command(s) to '{}'", out_path.display());
+        return Ok(());
+    }
+
     // Phase 2: clear and recreate the output directory.
     if output_dir.exists() {
         std::fs::remove_dir_all(&output_dir)
@@ -364,11 +403,7 @@ fn main() -> anyhow::Result<()> {
     // command lines, which run under Wine. In --wine mode pass the drive-rooted
     // `Z:\...` form; the rsp files themselves are still written to their /home
     // location below.
-    let rsp_dir_for_ninja: std::path::PathBuf = if wine {
-        unix_to_wine(rsp_dir.to_str().expect("rsp dir is valid UTF-8")).into()
-    } else {
-        rsp_dir.clone()
-    };
+    let rsp_dir_for_ninja: std::path::PathBuf = to_ninja_path(&rsp_dir, wine).into();
 
     // Phase 3: assign unique filenames and write.
     let mut used: HashSet<String> = HashSet::new();
@@ -386,7 +421,7 @@ fn main() -> anyhow::Result<()> {
         for (rsp_path, rsp_content) in output.rsp_files {
             // rsp_path came back in the `Z:\...` form we passed in; write the file
             // to its native /home location.
-            let rsp_path = native_path(&rsp_path, wine);
+            let rsp_path = to_host(&rsp_path, wine);
             std::fs::write(&rsp_path, &rsp_content)
                 .with_context(|| format!("Failed to write '{}'", rsp_path.display()))?;
         }
@@ -399,7 +434,7 @@ fn main() -> anyhow::Result<()> {
     // are `Z:\...` strings. This binary can't create those under Wine, so map
     // back to the native `/home/...` path for the syscall.
     for dir in &all_required_dirs {
-        let dir = native_path(dir, wine);
+        let dir = to_host(dir, wine);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Creating required directory '{}'", dir.display()))?;
     }
@@ -420,77 +455,6 @@ fn main() -> anyhow::Result<()> {
     );
 
     Ok(())
-}
-
-/// Lift a native Linux path to the drive-rooted form Wine exposes: the Linux
-/// root `/` is mounted at drive `Z:`, so `/home/x` -> `Z:\home\x`. Non-absolute
-/// inputs are returned unchanged.
-fn unix_to_wine(p: &str) -> String {
-    if p.starts_with('/') {
-        format!("Z:{}", p.replace('/', "\\"))
-    } else {
-        p.to_string()
-    }
-}
-
-/// Convert an include dir / source path as it appears in the emitted flags
-/// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
-/// native absolute filesystem path the preprocessor can actually open.
-fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
-    let replaced = raw.trim().replace('\\', "/");
-    let stripped = replaced
-        .strip_prefix("Z:")
-        .or_else(|| replaced.strip_prefix("z:"))
-        .unwrap_or(&replaced);
-    let path = Path::new(stripped);
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        proj_dir.join(path)
-    };
-    joined.normalize_lexically().unwrap_or(joined)
-}
-
-/// Map a native filesystem path back into the build-graph path space: `Z:\...`
-/// under --wine, native otherwise — mirroring how obj/source paths are emitted.
-///
-/// These header paths come from the scanner's `Path` operations. When this
-/// binary runs as a Windows PE under Wine (the `--wine` case), those operations
-/// normalize separators to `\` and drop the leading `/`, so we unify to forward
-/// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
-/// drive-rooted `Z:\home\...` form. Without the unification the path would be
-/// emitted drive-less (`\home\...`), inconsistent with every other graph path.
-fn native_to_ninja(path: &Path, wine: bool) -> String {
-    let path = path
-        .to_str()
-        .expect("header path is valid UTF-8")
-        .replace('\\', "/");
-    if wine {
-        unix_to_wine(&path)
-    } else {
-        path
-    }
-}
-
-/// Inverse of [`unix_to_wine`]: `Z:\home\x` -> `/home/x`. Used for the few real
-/// filesystem syscalls, since Rust's std cannot open `Z:\` paths under Wine.
-fn wine_to_unix(p: &str) -> String {
-    p.strip_prefix("Z:")
-        .or_else(|| p.strip_prefix("z:"))
-        .unwrap_or(p)
-        .replace('\\', "/")
-}
-
-/// Map a build-graph path back to the path this binary must touch on disk.
-/// In --wine mode the graph is in `Z:\...` form (what ninja/cl resolve), but the
-/// real file lives at the native `/home/...` path; without --wine it's already
-/// native. Used at every filesystem write/create-dir site.
-fn native_path(p: &std::path::Path, wine: bool) -> std::path::PathBuf {
-    if wine {
-        wine_to_unix(p.to_str().expect("path is valid UTF-8")).into()
-    } else {
-        p.to_path_buf()
-    }
 }
 
 fn print_cl_flags(name: &str, group: &vs2008_parser_lib::vcproj::ClGroup) {
@@ -526,7 +490,10 @@ fn collect_transitive_deps(
         // that are built /MD and reference msvcrt imports (e.g. __imp__vsnprintf_s)
         // -> unresolved against the /MT exe (which excludes msvcrt). VS never links
         // these into the exe.
-        let is_static_lib = guid_to_is_static_lib.get(&dep.uuid).copied().unwrap_or(false);
+        let is_static_lib = guid_to_is_static_lib
+            .get(&dep.uuid)
+            .copied()
+            .unwrap_or(false);
         if is_static_lib {
             collect_transitive_deps(
                 dep.uuid,
@@ -568,6 +535,8 @@ fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
 mod tests {
     use super::*;
     use ninja::{FinalStep, NinjaFile};
+    use std::path::Path;
+    use utils::{to_host, to_host_normalized, to_ninja_path};
     use vs2008_parser_lib::vcproj::{Flags, MsBuildEnvironment, VCProject};
 
     /// End-to-end check of the header-dependency feature over real on-disk
@@ -630,13 +599,13 @@ mod tests {
             let include_dirs: Vec<PathBuf> = group
                 .include_dirs
                 .iter()
-                .map(|dir| to_native(dir, &proj_dir))
+                .map(|dir| to_host_normalized(dir, &proj_dir))
                 .collect();
             let sources: Vec<PathBuf> = group
                 .flags
                 .files
                 .iter()
-                .map(|file| to_native(file, &proj_dir))
+                .map(|file| to_host_normalized(file, &proj_dir))
                 .collect();
             let result = preprocess::scan_translation_units(
                 &sources,
@@ -647,7 +616,7 @@ mod tests {
             group.header_deps = result
                 .headers
                 .iter()
-                .map(|header| native_to_ninja(header, false))
+                .map(|header| to_ninja_path(header, false))
                 .collect();
             group.header_deps.sort();
             group.header_deps.dedup();
@@ -678,9 +647,18 @@ mod tests {
         let deep = as_str(inc_dir.join("deep.h"));
         let dead = as_str(inc_dir.join("dead.h"));
 
-        assert!(text.contains(&shared), "shared.h must be an implicit input:\n{text}");
-        assert!(text.contains(&deep), "deep.h (transitive) must be an implicit input:\n{text}");
-        assert!(!text.contains(&dead), "dead.h behind #if 0 must be pruned:\n{text}");
+        assert!(
+            text.contains(&shared),
+            "shared.h must be an implicit input:\n{text}"
+        );
+        assert!(
+            text.contains(&deep),
+            "deep.h (transitive) must be an implicit input:\n{text}"
+        );
+        assert!(
+            !text.contains(&dead),
+            "dead.h behind #if 0 must be pruned:\n{text}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -692,13 +670,17 @@ mod tests {
     #[test]
     #[ignore]
     fn sweep_unknown_directives() {
-        let dir = std::env::var("VC2NINJA_SWEEP_DIR")
-            .expect("set VC2NINJA_SWEEP_DIR to a source tree");
+        let dir =
+            std::env::var("VC2NINJA_SWEEP_DIR").expect("set VC2NINJA_SWEEP_DIR to a source tree");
         let root = PathBuf::from(dir);
 
         let mut files = Vec::new();
         collect_sources(&root, &mut files);
-        eprintln!("scanning {} source/header files under {}", files.len(), root.display());
+        eprintln!(
+            "scanning {} source/header files under {}",
+            files.len(),
+            root.display()
+        );
 
         // keyword -> (files containing it, one sample "file: line")
         let mut tally: HashMap<String, (usize, String)> = HashMap::new();
@@ -707,8 +689,12 @@ mod tests {
         for file in &files {
             // Each file as its own root, no include dirs: we only want to
             // classify the directives literally present in the tree.
-            let result =
-                preprocess::scan_translation_units(std::slice::from_ref(file), &[], &[], &mut cache);
+            let result = preprocess::scan_translation_units(
+                std::slice::from_ref(file),
+                &[],
+                &[],
+                &mut cache,
+            );
             for unknown in result.unknown_directives {
                 let entry = tally.entry(unknown.keyword).or_insert_with(|| {
                     (0, format!("{}: {}", unknown.file.display(), unknown.line))
@@ -718,7 +704,7 @@ mod tests {
         }
 
         let mut ranked: Vec<_> = tally.into_iter().collect();
-        ranked.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+        ranked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
 
         eprintln!("\n=== unhandled #-directives (by file count) ===");
         if ranked.is_empty() {

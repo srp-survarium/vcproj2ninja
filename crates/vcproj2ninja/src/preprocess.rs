@@ -263,7 +263,12 @@ impl Scanner<'_> {
         }
     }
 
-    fn resolve_include(&mut self, current_dir: &Path, kind: IncludeKind, name: &str) -> Option<PathBuf> {
+    fn resolve_include(
+        &mut self,
+        current_dir: &Path,
+        kind: IncludeKind,
+        name: &str,
+    ) -> Option<PathBuf> {
         let name = name.replace('\\', "/");
 
         // Quote includes look next to the including file first; angle includes
@@ -372,7 +377,9 @@ enum Directive {
     Ignored,
     /// A `#`-prefixed directive we don't recognize. Surfaced so we can see what
     /// the scanner is failing to follow (it might matter for dependencies).
-    Unknown { keyword: String },
+    Unknown {
+        keyword: String,
+    },
 }
 
 /// A `#`-prefixed line whose directive keyword the scanner doesn't handle.
@@ -467,7 +474,8 @@ fn parse_pragma_comment_lib(rest: &str) -> Option<String> {
 /// Normalize a path lexically (collapse `.`/`..`), falling back to the input on
 /// the rare paths that can't be normalized.
 fn normalize(path: &Path) -> PathBuf {
-    path.normalize_lexically().unwrap_or_else(|_| path.to_path_buf())
+    path.normalize_lexically()
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Phase 2+3 of translation: splice `\`-newline continuations and strip
@@ -588,7 +596,10 @@ enum Tok {
 
 fn eval_expr(expr: &str, macros: &HashMap<String, String>) -> Option<i64> {
     let toks = resolve_tokens(&tokenize(expr), macros);
-    let mut parser = ExprParser { toks: &toks, pos: 0 };
+    let mut parser = ExprParser {
+        toks: &toks,
+        pos: 0,
+    };
     parser.parse()
 }
 
@@ -698,16 +709,17 @@ fn parse_number(chars: &[char], start: usize) -> (Option<i64>, usize) {
     let n = chars.len();
     let mut i = start;
 
-    let (radix, digit_start) = if chars[i] == '0' && i + 1 < n && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
-        (16, i + 2)
-    } else if chars[i] == '0' {
-        (8, i)
-    } else {
-        (10, i)
-    };
+    let (radix, digit_start) =
+        if chars[i] == '0' && i + 1 < n && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
+            (16, i + 2)
+        } else if chars[i] == '0' {
+            (8, i)
+        } else {
+            (10, i)
+        };
 
     i = digit_start;
-    let valid = |c: char, radix: u32| c.to_digit(radix).is_some();
+    let valid = |c: char, radix: u32| c.is_digit(radix);
     while i < n && valid(chars[i], radix) {
         i += 1;
     }
@@ -720,11 +732,7 @@ fn parse_number(chars: &[char], start: usize) -> (Option<i64>, usize) {
 
     let value = if digits.is_empty() {
         // Lone `0` parsed as octal with empty body == 0.
-        if radix == 8 {
-            Some(0)
-        } else {
-            None
-        }
+        if radix == 8 { Some(0) } else { None }
     } else {
         i64::from_str_radix(&digits, radix).ok()
     };
@@ -1176,12 +1184,8 @@ mod tests {
         .unwrap();
 
         let mut cache = FileCache::default();
-        let result = scan_translation_units(
-            &[dir.join("root.cpp")],
-            &[dir.clone()],
-            &[],
-            &mut cache,
-        );
+        let result =
+            scan_translation_units(&[dir.join("root.cpp")], &[dir.clone()], &[], &mut cache);
 
         let names: HashSet<String> = result
             .headers
@@ -1196,7 +1200,10 @@ mod tests {
             .collect();
 
         assert!(names.contains("a.h"), "a.h should be a dependency");
-        assert!(names.contains("b.h"), "b.h (transitive) should be a dependency");
+        assert!(
+            names.contains("b.h"),
+            "b.h (transitive) should be a dependency"
+        );
         assert!(!names.contains("dead.h"), "#if 0 block must be pruned");
         assert_eq!(result.pragma_libs, vec!["z.lib".to_string()]);
 
