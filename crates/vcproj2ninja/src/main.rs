@@ -3,15 +3,17 @@
 mod compdb;
 mod ninja;
 mod preprocess;
+mod utils;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
 use uuid::Uuid;
 
 use ninja::{FinalStep, NinjaFile};
+use utils::{native_path, native_to_ninja, to_native, unix_to_wine};
 use vs2008_parser_lib::vcproj::{ConfigurationType, Flags, MsBuildEnvironment};
 use vs2008_parser_lib::{sln, vcproj};
 
@@ -465,73 +467,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Lift a native Linux path to the drive-rooted form Wine exposes: the Linux
-/// root `/` is mounted at drive `Z:`, so `/home/x` -> `Z:\home\x`. Non-absolute
-/// inputs are returned unchanged.
-fn unix_to_wine(p: &str) -> String {
-    if p.starts_with('/') {
-        format!("Z:{}", p.replace('/', "\\"))
-    } else {
-        p.to_string()
-    }
-}
-
-/// Convert an include dir / source path as it appears in the emitted flags
-/// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
-/// native absolute filesystem path the preprocessor can actually open.
-fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
-    let replaced = raw.trim().replace('\\', "/");
-    let stripped = replaced
-        .strip_prefix("Z:")
-        .or_else(|| replaced.strip_prefix("z:"))
-        .unwrap_or(&replaced);
-    let path = Path::new(stripped);
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        proj_dir.join(path)
-    };
-    joined.normalize_lexically().unwrap_or(joined)
-}
-
-/// Map a native filesystem path back into the build-graph path space: `Z:\...`
-/// under --wine, native otherwise — mirroring how obj/source paths are emitted.
-///
-/// These header paths come from the scanner's `Path` operations. When this
-/// binary runs as a Windows PE under Wine (the `--wine` case), those operations
-/// normalize separators to `\` and drop the leading `/`, so we unify to forward
-/// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
-/// drive-rooted `Z:\home\...` form. Without the unification the path would be
-/// emitted drive-less (`\home\...`), inconsistent with every other graph path.
-fn native_to_ninja(path: &Path, wine: bool) -> String {
-    let path = path
-        .to_str()
-        .expect("header path is valid UTF-8")
-        .replace('\\', "/");
-    if wine { unix_to_wine(&path) } else { path }
-}
-
-/// Inverse of [`unix_to_wine`]: `Z:\home\x` -> `/home/x`. Used for the few real
-/// filesystem syscalls, since Rust's std cannot open `Z:\` paths under Wine.
-fn wine_to_unix(p: &str) -> String {
-    p.strip_prefix("Z:")
-        .or_else(|| p.strip_prefix("z:"))
-        .unwrap_or(p)
-        .replace('\\', "/")
-}
-
-/// Map a build-graph path back to the path this binary must touch on disk.
-/// In --wine mode the graph is in `Z:\...` form (what ninja/cl resolve), but the
-/// real file lives at the native `/home/...` path; without --wine it's already
-/// native. Used at every filesystem write/create-dir site.
-fn native_path(p: &std::path::Path, wine: bool) -> std::path::PathBuf {
-    if wine {
-        wine_to_unix(p.to_str().expect("path is valid UTF-8")).into()
-    } else {
-        p.to_path_buf()
-    }
-}
-
 fn print_cl_flags(name: &str, group: &vs2008_parser_lib::vcproj::ClGroup) {
     eprintln!("[cl][{name}]: {}", group.flags.rsp_flags);
 }
@@ -610,6 +545,7 @@ fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
 mod tests {
     use super::*;
     use ninja::{FinalStep, NinjaFile};
+    use utils::{native_path, native_to_ninja, to_native, unix_to_wine};
     use vs2008_parser_lib::vcproj::{Flags, MsBuildEnvironment, VCProject};
 
     /// End-to-end check of the header-dependency feature over real on-disk

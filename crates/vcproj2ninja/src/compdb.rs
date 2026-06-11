@@ -16,7 +16,18 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use nom::{
+    Parser,
+    branch::alt,
+    bytes::complete::{tag, take_while, take_while1},
+    character::complete::{char, multispace0, multispace1},
+    combinator::map,
+    multi::{many0, many1},
+    sequence::{delimited, preceded},
+};
+
 use crate::ninja::NinjaFile;
+use crate::utils::host_path;
 
 /// Flags that only affect codegen/PDB/PCH output - meaningless or harmful for
 /// a syntax-only clang view. Matched by prefix against the token (so the
@@ -58,74 +69,68 @@ const COMPAT_TAIL: &[&str] = &[
     "-Wno-non-pod-varargs",
 ];
 
-/// Lower a possibly Wine-rooted (`Z:\...`) string to native form.
-fn wine_to_unix(p: &str) -> String {
-    let p = p.replace('\\', "/");
-    match p.strip_prefix("Z:").or_else(|| p.strip_prefix("z:")) {
-        Some(rest) => rest.to_string(),
-        None => p,
-    }
-}
-
-/// Tokenize an rsp flag string, honoring double quotes (`/I "a b"` is two
-/// tokens, the second being `a b` unquoted).
-fn tokenize(s: &str) -> Vec<String> {
-    let mut out = vec![];
-    let mut cur = String::new();
-    let mut in_quotes = false;
-    for c in s.chars() {
-        match c {
-            '"' => in_quotes = !in_quotes,
-            c if c.is_whitespace() && !in_quotes => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            c => cur.push(c),
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
 fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// One classified cl argument.
+enum ClArg {
+    /// `/I<dir>`, `/I "<dir>"`, `/I"<dir>"`
+    Include(String),
+    /// `/D<def>`, `/D "<def>"`
+    Define(String),
+    /// anything else, quotes stripped
+    Other(String),
+}
+
+/// One lexical token: a run of quoted and bare segments glued together
+/// (`/Fp"a b.pch"` is ONE token `/Fpa b.pch`), matching cl's rsp quoting.
+fn token(input: &str) -> nom::IResult<&str, String> {
+    map(
+        many1(alt((
+            delimited(char('"'), take_while(|c| c != '"'), char('"')),
+            take_while1(|c: char| !c.is_whitespace() && c != '"'),
+        ))),
+        |parts: Vec<&str>| parts.concat(),
+    )
+    .parse(input)
+}
+
+/// `/I` / `/D` value: attached (rest of this token) or detached (next token).
+fn arg_value(input: &str) -> nom::IResult<&str, String> {
+    alt((token, preceded(multispace1, token))).parse(input)
+}
+
+fn cl_arg(input: &str) -> nom::IResult<&str, ClArg> {
+    alt((
+        map(preceded(tag("/I"), arg_value), ClArg::Include),
+        map(preceded(tag("/D"), arg_value), ClArg::Define),
+        map(token, ClArg::Other),
+    ))
+    .parse(input)
+}
+
 /// Translate one cl rsp flag string into clang-cl arguments (without sources).
-fn translate_flags(rsp_flags: &str) -> Vec<String> {
-    let toks = tokenize(rsp_flags);
+fn translate_flags(rsp_flags: &str, wine: bool) -> Vec<String> {
+    let (_rest, parsed) = many0(preceded(multispace0, cl_arg))
+        .parse(rsp_flags)
+        .expect("many0 over tokens cannot fail");
+
     let mut args = vec![];
-    let mut i = 0;
-    while i < toks.len() {
-        let t = &toks[i];
-        if let Some(rest) = t.strip_prefix("/I") {
-            let dir = if rest.is_empty() {
-                i += 1;
-                toks.get(i).cloned().unwrap_or_default()
-            } else {
-                rest.to_string()
-            };
-            args.push(format!("/I{}", wine_to_unix(&dir)));
-        } else if let Some(rest) = t.strip_prefix("/D") {
-            let def = if rest.is_empty() {
-                i += 1;
-                toks.get(i).cloned().unwrap_or_default()
-            } else {
-                rest.to_string()
-            };
-            args.push(format!("/D{def}"));
-        } else if DROP_PREFIXES.iter().any(|p| t.starts_with(p)) {
-            // attached-arg spellings die here; the rsps use no detached ones
-            // for the dropped set.
-        } else if t.ends_with(".cpp") || t.ends_with(".c") || t.ends_with(".cc") {
-            // sources are appended per-entry by the caller
-        } else {
-            args.push(t.clone());
+    for arg in parsed {
+        match arg {
+            ClArg::Include(dir) => args.push(format!("/I{}", host_path(&dir, wine))),
+            ClArg::Define(def) => args.push(format!("/D{def}")),
+            ClArg::Other(t) => {
+                if DROP_PREFIXES.iter().any(|p| t.starts_with(p)) {
+                    // codegen-only flag; attached-arg spellings die with it
+                } else if t.ends_with(".cpp") || t.ends_with(".c") || t.ends_with(".cc") {
+                    // sources are appended per-entry by the caller
+                } else {
+                    args.push(t);
+                }
+            }
         }
-        i += 1;
     }
     args
 }
@@ -133,12 +138,12 @@ fn translate_flags(rsp_flags: &str) -> Vec<String> {
 /// System include dirs, from the same `INCLUDE` environment variable cl.exe
 /// itself resolves system headers through (vcvars on Windows, the Wine prefix
 /// registry env here) - no caller configuration needed.
-fn include_env_dirs() -> Vec<String> {
+fn include_env_dirs(wine: bool) -> Vec<String> {
     std::env::var("INCLUDE")
         .unwrap_or_default()
         .split(';')
         .filter(|d| !d.trim().is_empty())
-        .map(wine_to_unix)
+        .map(|d| host_path(d, wine))
         .collect()
 }
 
@@ -230,7 +235,7 @@ pub fn write_compile_commands(
     wine: bool,
     extra_args: &[String],
 ) -> anyhow::Result<usize> {
-    let include_dirs = include_env_dirs();
+    let include_dirs = include_env_dirs(wine);
     if include_dirs.is_empty() {
         eprintln!("warning: INCLUDE is empty - system headers (windows.h, CRT) will not resolve");
     }
@@ -259,11 +264,11 @@ pub fn write_compile_commands(
     let mut out = String::from("[\n");
 
     for (_guid, _name, nf) in ninja_files {
-        let dir = wine_to_unix(&nf.proj_dir);
+        let dir = host_path(&nf.proj_dir, wine);
         for group in &nf.cl {
-            let flags = translate_flags(&group.flags.rsp_flags);
+            let flags = translate_flags(&group.flags.rsp_flags, wine);
             for src in &group.flags.files {
-                let src = wine_to_unix(src);
+                let src = host_path(src, wine);
                 let src = src.trim_start_matches("./");
                 let file = if src.starts_with('/') {
                     src.to_string()

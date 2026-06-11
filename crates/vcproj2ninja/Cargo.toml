@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+nom = { workspace = true }
 uuid = { workspace = true }
 
 vs2008-parser-lib = { workspace = true }
