@@ -36,31 +36,27 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    /// Deprecated alias for `--target wine` (kept for existing callers).
+    /// Run the generated/consuming tools under Wine on Linux (affects HOW
+    /// paths are computed, not WHAT is generated - combine with any --target).
+    ///
+    /// This binary is a Windows .exe run under Wine, fed native Linux paths.
+    /// Windows path arithmetic (normalize/pathdiff) only behaves correctly on
+    /// *drive-rooted* paths; on drive-less `/home/...` it misfires. Under Wine
+    /// the Linux root is mounted at drive `Z:`, so with `--wine` we lift the
+    /// arithmetic roots (`sln_path`'s dir and each project dir) to `Z:\...`.
+    /// For `--target ninja` the emitted graph keeps the `Z:\...` form (what
+    /// ninja/cl resolve under Wine); for `--target clangd` the arithmetic
+    /// result is lowered back to `/...` at emission (clangd runs natively).
+    /// The actual filesystem reads/writes always use the original `/home/...`
+    /// paths, since Rust's std cannot open `Z:\` paths under Wine.
     #[arg(long)]
     pub wine: bool,
 
-    /// Output target:
-    ///
-    /// `windows` (default) - ninja build graph with native Windows paths,
-    /// for running the tool and the build on Windows proper.
-    ///
-    /// `wine` - ninja build graph for running ninja.exe/cl.exe under Wine on
-    /// Linux. This binary is a Windows .exe run under Wine, fed native Linux
-    /// paths; Windows path arithmetic (normalize/pathdiff) only behaves
-    /// correctly on *drive-rooted* paths, and under Wine the Linux root is
-    /// mounted at drive `Z:`, so the arithmetic roots (`sln_path`'s dir and
-    /// each project dir) are lifted to `Z:\...` so every emitted build-graph
-    /// path comes out `Z:\...` (what ninja/cl resolve). The actual filesystem
-    /// reads/writes still use the original `/home/...` paths, since Rust's
-    /// std cannot open `Z:\` paths under Wine.
-    ///
-    /// `clangd` - compile_commands.json (clang-cl flavor) into the output dir
-    /// instead of a build graph; the output dir is NOT cleared. Paths are
-    /// emitted in the host's native form (under Wine the `Z:\...` arithmetic
-    /// is lowered back to `/...`; on Windows they stay drive-rooted).
-    #[arg(long, value_enum)]
-    pub target: Option<Target>,
+    /// WHAT to generate: `ninja` (default) - the build graph + rsp files;
+    /// `clangd` - compile_commands.json (clang-cl flavor) into the output
+    /// dir instead (the output dir is NOT cleared in this mode).
+    #[arg(long, value_enum, default_value_t = Target::Ninja)]
+    pub target: Target,
 
     /// (--target clangd) System include dir, emitted as `-imsvc<dir>`
     /// (VC8 CRT, WinSDK). Repeatable.
@@ -75,11 +71,9 @@ pub struct Cli {
 
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum Target {
-    /// Ninja graph, native Windows paths (run on Windows).
-    Windows,
-    /// Ninja graph, `Z:\...`-lifted paths (run under Wine on Linux).
-    Wine,
-    /// compile_commands.json for clangd (host-native paths).
+    /// Ninja build graph + rsp files.
+    Ninja,
+    /// compile_commands.json for clangd.
     Clangd,
 }
 
@@ -95,12 +89,6 @@ fn main() -> anyhow::Result<()> {
         imsvc,
         extra_arg,
     } = Cli::parse();
-
-    // `--wine` is a deprecated alias for `--target wine`; an explicit
-    // `--target` wins. Under Wine the Z:-lifting applies to the clangd
-    // backend's path arithmetic too (lowered back at emission).
-    let target = target.unwrap_or(if wine { Target::Wine } else { Target::Windows });
-    let wine = wine || target == Target::Wine;
 
     let sln = std::fs::read_to_string(&sln_path)
         .with_context(|| format!("Reading sln '{}'", sln_path.display()))?;
