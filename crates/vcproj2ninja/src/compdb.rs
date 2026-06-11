@@ -29,8 +29,8 @@ use nom::{
 use crate::ninja::NinjaFile;
 use crate::utils::to_host_str;
 
-/// Flags that only affect codegen/PDB/PCH output - meaningless or harmful for
-/// a syntax-only clang view. Matched by prefix against the token (so the
+/// Flags that only affect codegen/PDB/PCH/driver output - meaningless for a
+/// syntax-only clang view. Matched by prefix against the token (so the
 /// attached-argument spellings `/Fp"..."`, `/Fo"..."` die with their flag).
 const DROP_PREFIXES: &[&str] = &[
     "/Yc",
@@ -45,15 +45,8 @@ const DROP_PREFIXES: &[&str] = &[
     "/Zi",
     "/ZI",
     "/Zc:",
-    "/W1",
-    "/W2",
-    "/W3",
-    "/W4",
-    "/WX",
-    "/wd",
     "/errorReport",
     "/nologo",
-    "/analyze",
     "/showIncludes",
     "/c",
 ];
