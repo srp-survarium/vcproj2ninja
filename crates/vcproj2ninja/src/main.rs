@@ -87,6 +87,13 @@ fn main() -> anyhow::Result<()> {
         extra_arg,
     } = Cli::parse();
 
+    // All emitted paths derive from the sln dir; a relative --sln-path would
+    // make them relative to the caller's cwd (clangd then silently falls back
+    // to a generic command for every file). Absolutize lexically - canonicalize
+    // would resolve symlinks and change path spellings (NixOS /home links).
+    let sln_path = std::path::absolute(&sln_path)
+        .with_context(|| format!("Absolutizing sln path '{}'", sln_path.display()))?;
+
     let sln = std::fs::read_to_string(&sln_path)
         .with_context(|| format!("Reading sln '{}'", sln_path.display()))?;
     let sln = match sln::Sln::parse(&sln) {
