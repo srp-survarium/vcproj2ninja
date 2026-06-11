@@ -58,13 +58,9 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = Target::Ninja)]
     pub target: Target,
 
-    /// (--target clangd) System include dir, emitted as `-imsvc<dir>`
-    /// (VC8 CRT, WinSDK). Repeatable.
-    #[arg(long)]
-    pub imsvc: Vec<String>,
-
-    /// (--target clangd) Extra argument appended verbatim to every entry
-    /// (VFS overlay, _STLP_NATIVE_INCLUDE_PATH define, ...). Repeatable.
+    /// (--target clangd) Optional escape hatch: extra argument appended
+    /// verbatim to every entry. System include dirs, the stlport pin and the
+    /// VFS overlay are derived from the environment - nothing is required.
     #[arg(long)]
     pub extra_arg: Vec<String>,
 }
@@ -86,7 +82,6 @@ fn main() -> anyhow::Result<()> {
         verbose,
         wine,
         target,
-        imsvc,
         extra_arg,
     } = Cli::parse();
 
@@ -389,7 +384,9 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&output_dir)
             .with_context(|| format!("Creating output dir '{}'", output_dir.display()))?;
         let out_path = output_dir.join("compile_commands.json");
-        let n = compdb::write_compile_commands(&ninja_files, &out_path, &imsvc, &extra_arg)?;
+        let source_root = sln_path.parent().context("Sln path must have a parent")?;
+        let n =
+            compdb::write_compile_commands(&ninja_files, &out_path, source_root, wine, &extra_arg)?;
         println!("Wrote {n} compile command(s) to '{}'", out_path.display());
         return Ok(());
     }
