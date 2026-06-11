@@ -60,8 +60,10 @@ const COMPAT_TAIL: &[&str] = &[
     "/clang:--target=i686-pc-windows-msvc",
     "/clang:-std=c++98",
     // Remove default clangd diagnostic since it is a non warning for MSVC.
-    // e.g. weapon_ammunition.h passes a `mutable_buffer` through a printf-style
-    // `...` - MSVC8 byte-copies the object, clang errors by default.
+    // e.g. VOSTOK_UNREFERENCED_PARAMETERS(...) feeds its arguments to the
+    // variadic eater `unreferenced_parameter_helper(...)`; with a non-POD arg
+    // (weapon_ammunition.h:50 passes a `mutable_buffer&`) clang errors on the
+    // call even though it is dead code behind `identity(false)`.
     "-Wno-non-pod-varargs",
 ];
 
@@ -236,6 +238,8 @@ pub fn write_compile_commands(
         eprintln!("warning: INCLUDE is empty - system headers (windows.h, CRT) will not resolve");
     }
 
+    // -imsvc MUST stay a clang-cl-mode argument: forwarded through /clang: the
+    // gcc-mode driver silently drops it (and system headers stop resolving).
     let mut derived: Vec<String> = include_dirs.iter().map(|d| format!("-imsvc{d}")).collect();
     // stlport resolves native headers via `<$(path)/header)>`; its MSVC default
     // `../include` only works relative to the VC include dir - pin it absolute.
