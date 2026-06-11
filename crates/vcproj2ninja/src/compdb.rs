@@ -145,17 +145,13 @@ fn include_env_dirs(wine: bool) -> Vec<String> {
         .collect()
 }
 
-/// File kinds that can never be `#include`d - keep the overlay lean.
-const OVERLAY_SKIP_EXT: &[&str] = &[
-    "cpp", "c", "cc", "obj", "lib", "pdb", "vcproj", "sln", "rc", "ico", "bmp", "png", "jpg",
-    "txt", "md", "py", "cmake", "bat", "exe", "dll",
-];
-
 /// Write a case-insensitive VFS overlay over the system include dirs and the
 /// source tree. Wine's filesystem view is case-insensitive, so the sources
 /// freely mix include/file case (`<fastdelegate/fastdelegate.h>` vs
 /// `FastDelegate.h`); on a case-sensitive host clang needs this overlay to
-/// resolve them. Returns the number of files mapped.
+/// resolve them. Every file is mapped - filtering by extension risks breaking
+/// legitimate includes (third-party code `#include`s `.c` files) for the sake
+/// of JSON bytes. Returns the number of files mapped.
 fn write_vfs_overlay(
     overlay_path: &Path,
     include_dirs: &[String],
@@ -185,10 +181,6 @@ fn write_vfs_overlay(
                 if name != ".git" {
                     stack.push(path);
                 }
-                continue;
-            }
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if OVERLAY_SKIP_EXT.contains(&ext.to_ascii_lowercase().as_str()) {
                 continue;
             }
             if !first {
