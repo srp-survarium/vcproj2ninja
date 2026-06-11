@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// Lift a native Linux path to the drive-rooted form Wine exposes: the Linux
 /// root `/` is mounted at drive `Z:`, so `/home/x` -> `Z:\home\x`. Non-absolute
 /// inputs are returned unchanged.
-pub(crate) fn unix_to_wine(p: &str) -> String {
+pub fn unix_to_wine(p: &str) -> String {
     if p.starts_with('/') {
         format!("Z:{}", p.replace('/', "\\"))
     } else {
@@ -27,12 +27,12 @@ fn wine_to_unix(p: &str) -> String {
 
 /// Host form of a path string: lowered from the Wine view under `--wine`,
 /// untouched on Windows (drive-rooted paths must stay drive-rooted).
-pub(crate) fn host_path(p: &str, wine: bool) -> String {
+pub fn host_path(p: &str, wine: bool) -> String {
     if wine { wine_to_unix(p) } else { p.to_string() }
 }
 
 /// [`host_path`] for `Path` values.
-pub(crate) fn native_path(p: &Path, wine: bool) -> PathBuf {
+pub fn native_path(p: &Path, wine: bool) -> PathBuf {
     if wine {
         wine_to_unix(p.to_str().expect("path is valid UTF-8")).into()
     } else {
@@ -49,7 +49,7 @@ pub(crate) fn native_path(p: &Path, wine: bool) -> PathBuf {
 /// slashes first; `unix_to_wine` then lifts a rooted `/home/...` to the
 /// drive-rooted `Z:\home\...` form. Without the unification the path would be
 /// emitted drive-less (`\home\...`), inconsistent with every other graph path.
-pub(crate) fn native_to_ninja(path: &Path, wine: bool) -> String {
+pub fn native_to_ninja(path: &Path, wine: bool) -> String {
     let path = path
         .to_str()
         .expect("header path is valid UTF-8")
@@ -60,7 +60,7 @@ pub(crate) fn native_to_ninja(path: &Path, wine: bool) -> String {
 /// Convert an include dir / source path as it appears in the emitted flags
 /// (possibly `Z:\...` under --wine, possibly relative with backslashes) into a
 /// native absolute filesystem path the preprocessor can actually open.
-pub(crate) fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
+pub fn to_native(raw: &str, proj_dir: &Path) -> PathBuf {
     let replaced = raw.trim().replace('\\', "/");
     let stripped = replaced
         .strip_prefix("Z:")

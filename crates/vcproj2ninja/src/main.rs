@@ -545,6 +545,7 @@ fn unique_stem(used: &mut HashSet<String>, base: &str) -> String {
 mod tests {
     use super::*;
     use ninja::{FinalStep, NinjaFile};
+    use std::path::Path;
     use utils::{native_path, native_to_ninja, to_native, unix_to_wine};
     use vs2008_parser_lib::vcproj::{Flags, MsBuildEnvironment, VCProject};
 
