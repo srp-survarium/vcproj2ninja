@@ -65,6 +65,12 @@ const COMPAT_TAIL: &[&str] = &[
     // (weapon_ammunition.h:50 passes a `mutable_buffer&`) clang errors on the
     // call even though it is dead code behind `identity(false)`.
     "-Wno-non-pod-varargs",
+    // The MSVC8-dialect errors clang cannot be talked out of (plus their
+    // knock-on conversion errors) exceed the default ~20 error limit, which
+    // ABORTS the parse mid-TU and loses the AST below the abort point.
+    // (bare spelling: clang-cl passes -f flags through; /clang: drops some)
+    // Unlimited keeps recovery going to the end of every TU.
+    "-ferror-limit=0",
 ];
 
 fn json_escape(s: &str) -> String {
