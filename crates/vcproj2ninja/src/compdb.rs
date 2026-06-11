@@ -58,7 +58,9 @@ const COMPAT_TAIL: &[&str] = &[
     "-fms-compatibility-version=14.00",
     "/clang:--target=i686-pc-windows-msvc",
     "/clang:-std=c++98",
-    // navigation-only policy: clang's opinion of MSVC8 code is not build truth
+    // dialect compat, not display policy: MSVC8 accepts non-POD-through-varargs
+    // (the engine relies on it); clang makes it an ERROR by default, which would
+    // burn the error limit and degrade AST recovery at those call sites.
     "-Wno-non-pod-varargs",
 ];
 
