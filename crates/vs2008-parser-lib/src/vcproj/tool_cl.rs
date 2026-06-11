@@ -305,7 +305,9 @@ flag_enum! {
 /// structured data the generator's preprocessor needs (include dirs, defines).
 pub struct ClFlags {
     pub flags: Flags,
-    pub pch_output: Option<PathBuf>,
+    /// The group's expanded `/Fp` path (an explicit attribute or the VS
+    /// default); whether the group produces or consumes it is `/Yc` vs `/Yu`.
+    pub pch_file: Option<PathBuf>,
     pub fd_path: Option<String>,
     pub include_dirs: Vec<String>,
     pub defines: Vec<String>,
@@ -319,28 +321,7 @@ impl CompilerTool {
         env: MsBuildEnvironment,
     ) -> Vec<ClGroup> {
         let mut result: Vec<ClGroup> = vec![];
-        let mut pch_path: Option<PathBuf> = None;
-
-        let mut tool_n_files = Self::parse_files(&vcproject.files, &cfg.name)
-            .into_iter()
-            .fold(
-                HashMap::<CompilerTool, Vec<&str>>::new(),
-                |mut map, (k, v)| {
-                    map.entry(self.clone().merge(k)).or_default().extend(v);
-                    map
-                },
-            )
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        // PCH creation (/Yc) must be compiled before everything else
-        tool_n_files.sort_by_key(|(tool, _)| {
-            if matches!(tool.use_precompiled_header, Some(UsePrecompiledHeader::_1)) {
-                0usize
-            } else {
-                1usize
-            }
-        });
+        let tool_n_files = self.parse_files(&vcproject.files, &cfg.name);
 
         for (tool, files) in tool_n_files {
             let mut env = env;
@@ -357,26 +338,18 @@ impl CompilerTool {
 
             let ClFlags {
                 mut flags,
-                pch_output,
+                pch_file,
                 fd_path,
                 include_dirs,
                 defines,
             } = tool.to_flags_impl(cfg, env);
             flags.files = files.iter().map(|file| file.to_string()).collect();
 
-            let pch_input = if pch_output.is_none()
-                && matches!(
-                    tool.use_precompiled_header,
-                    Some(UsePrecompiledHeader::_2 | UsePrecompiledHeader::_3)
-                ) {
-                pch_path.clone()
-            } else {
-                None
+            let (pch_output, pch_input) = match tool.use_precompiled_header {
+                Some(UsePrecompiledHeader::_1) => (pch_file, None),
+                Some(UsePrecompiledHeader::_2 | UsePrecompiledHeader::_3) => (None, pch_file),
+                _ => (None, None),
             };
-
-            if let Some(p) = &pch_output {
-                pch_path = Some(p.clone());
-            }
 
             result.push(ClGroup {
                 flags,
@@ -388,6 +361,11 @@ impl CompilerTool {
                 header_deps: vec![],
             });
         }
+
+        result.sort_by(|a, b| {
+            (a.flags.rsp_flags.cmp(&b.flags.rsp_flags))
+                .then_with(|| a.flags.files.cmp(&b.flags.files))
+        });
 
         result
     }
@@ -618,16 +596,12 @@ impl CompilerTool {
         );
 
         // /Fp"E:\Projects\vostok\sources\../binaries/Win32/intermediates/Master Gold/fs\vostok_fs-static-gold.pch"
-        let pch_output = if let Some(precompiled_header_file) = precompiled_header_file
+        let pch_file = if let Some(precompiled_header_file) = precompiled_header_file
             && !precompiled_header_file.is_empty()
         {
             let expanded = env.expand(precompiled_header_file);
             rsp_flags.push(format!("/Fp\"{expanded}\""));
-            if matches!(use_precompiled_header, Some(UsePrecompiledHeader::_1)) {
-                Some(PathBuf::from(expanded))
-            } else {
-                None
-            }
+            Some(PathBuf::from(expanded))
         } else {
             None
         };
@@ -698,7 +672,7 @@ impl CompilerTool {
                 rsp_flags: rsp_flags.join(" "),
                 files: vec![],
             },
-            pch_output,
+            pch_file,
             fd_path,
             include_dirs,
             defines,
@@ -706,17 +680,18 @@ impl CompilerTool {
     }
 
     fn parse_files<'a>(
+        &self,
         files: &'a Files,
         configuration_platform: &str,
     ) -> HashMap<CompilerTool, Vec<&'a str>> {
         let mut result = HashMap::new();
 
         for filter in &files.filters {
-            Self::parse_filter(&mut result, filter, configuration_platform);
+            self.parse_filter(&mut result, filter, configuration_platform);
         }
 
         for file in &files.files {
-            Self::parse_file(&mut result, file, configuration_platform);
+            self.parse_file(&mut result, file, configuration_platform);
         }
         for files in result.values_mut() {
             // It is possible for the same file to repeat multiple times in `Files` tag.
@@ -729,26 +704,28 @@ impl CompilerTool {
     }
 
     fn parse_filter<'a>(
+        &self,
         result: &mut HashMap<CompilerTool, Vec<&'a str>>,
         filter: &'a Filter,
         configuration_platform: &str,
     ) {
         for filter in &filter.filters {
-            Self::parse_filter(result, filter, configuration_platform);
+            self.parse_filter(result, filter, configuration_platform);
         }
 
         for file in &filter.files {
-            Self::parse_file(result, file, configuration_platform);
+            self.parse_file(result, file, configuration_platform);
         }
     }
 
     fn parse_file<'a>(
+        &self,
         result: &mut HashMap<CompilerTool, Vec<&'a str>>,
         file: &'a File,
         configuration_platform: &str,
     ) {
         for file in &file.files {
-            Self::parse_file(result, file, configuration_platform);
+            self.parse_file(result, file, configuration_platform);
         }
 
         let file_extension = Path::new(&file.relative_path)
@@ -792,7 +769,7 @@ impl CompilerTool {
         cl_tool.compile_as = Some(compile_as);
 
         result
-            .entry(cl_tool)
+            .entry(self.clone().merge(cl_tool))
             .or_default()
             .push(file.relative_path.as_str());
     }
@@ -850,24 +827,25 @@ mod tests {
         // Yc group + Yu group + independent other.cpp = 3 groups.
         assert_eq!(groups.len(), 3, "expected Yc, Yu, and independent groups");
 
-        // Sort puts Yc (/Yc = key 0) first.
-        let yc_group = &groups[0];
-        assert!(yc_group.flags.files.iter().any(|f| f.contains("pch.cpp")));
-        assert!(
-            yc_group.pch_output.is_some(),
-            "Yc group should have pch_output"
-        );
+        // Group order is flag-derived (deterministic but not meaningful) -
+        // locate groups by content.
+        let find = |name: &str| {
+            groups
+                .iter()
+                .find(|g| g.flags.files.iter().any(|f| f.contains(name)))
+                .unwrap_or_else(|| panic!("no group contains {name}"))
+        };
+
+        // ("pch.cpp" is a substring of "use_pch.cpp" - find Yc by its output)
+        let yc_group = groups
+            .iter()
+            .find(|g| g.pch_output.is_some())
+            .expect("no group creates the pch");
+        assert!(yc_group.flags.files.iter().any(|f| f.ends_with("pch.cpp")));
         assert!(yc_group.pch_input.is_none());
 
         // Yu group consumes the PCH.
-        let yu_group = &groups[1];
-        assert!(
-            yu_group
-                .flags
-                .files
-                .iter()
-                .any(|f| f.contains("use_pch.cpp"))
-        );
+        let yu_group = find("use_pch.cpp");
         assert!(
             yu_group.pch_input.is_some(),
             "Yu group should have pch_input"
@@ -875,14 +853,7 @@ mod tests {
         assert!(yu_group.pch_output.is_none());
 
         // The non-PCH file is independent.
-        let other_group = &groups[2];
-        assert!(
-            other_group
-                .flags
-                .files
-                .iter()
-                .any(|f| f.contains("other.cpp"))
-        );
+        let other_group = find("other.cpp");
         assert!(other_group.pch_input.is_none());
         assert!(other_group.pch_output.is_none());
     }
