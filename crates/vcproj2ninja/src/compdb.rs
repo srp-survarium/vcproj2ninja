@@ -55,12 +55,15 @@ const DROP_PREFIXES: &[&str] = &[
 /// `-imsvc` MUST stay a clang-cl-mode argument: forwarded through `/clang:` the
 /// gcc-mode driver silently drops it.
 const COMPAT_TAIL: &[&str] = &[
+    // Impersonate cl 14.00 (VS2005/MSVC8): _MSC_VER=1400, so every
+    // `#if _MSC_VER` branch in stlport/boost/engine resolves as it did
+    // under the real compiler.
     "-fms-compatibility-version=14.00",
     "/clang:--target=i686-pc-windows-msvc",
     "/clang:-std=c++98",
-    // dialect compat, not display policy: MSVC8 accepts non-POD-through-varargs
-    // (the engine relies on it); clang makes it an ERROR by default, which would
-    // burn the error limit and degrade AST recovery at those call sites.
+    // Remove default clangd diagnostic, since it is a non warning for MSVC.
+    // e.g. weapon_ammunition.h passes a `mutable_buffer` through a printf-style
+    // `...` - MSVC8 byte-copies the object, clang errors by default.
     "-Wno-non-pod-varargs",
 ];
 
