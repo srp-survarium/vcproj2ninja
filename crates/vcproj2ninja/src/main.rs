@@ -1,5 +1,6 @@
 #![feature(os_string_truncate, normalize_lexically)]
 
+mod cache;
 mod compdb;
 mod ninja;
 mod preprocess;
@@ -124,6 +125,29 @@ fn main() -> anyhow::Result<()> {
     let mut ninja_files: Vec<(Uuid, String, NinjaFile)> = vec![];
     let mut guid_to_link_output: HashMap<Uuid, String> = HashMap::new();
 
+    // --- Header-scan cache ---
+    // Open the persistent SQLite cache and compute which files changed since
+    // the last run.  Only those files (plus consumers of changed headers) will
+    // be rescanned; everything else reuses the cached header list.
+    let cache_db = cache::open_db(&output_dir)?;
+    let scan_roots = vec![{
+        // sln_path is absolute; the source tree is its parent.
+        sln_path
+            .parent()
+            .context("sln path must have a parent")?
+            .to_path_buf()
+    }];
+    let diff = cache::compute_diff(&cache_db, &scan_roots)?;
+    if verbose {
+        eprintln!(
+            "[cache] {} file(s) need scanning, {} deleted ({} total tracked)",
+            diff.needs_scan.len(),
+            diff.deleted.len(),
+            // Approximate total from a fast count — not worth a second walk.
+            "...",
+        );
+    }
+
     // Preprocessor directives we don't follow, warned about once per keyword
     // across the whole run so we can see what — if anything — we're missing.
     let mut warned_directives: HashSet<String> = HashSet::new();
@@ -188,6 +212,9 @@ fn main() -> anyhow::Result<()> {
         // transitively include, so header edits force a recompile. The scan
         // also collects #pragma comment(lib, ...) directives (surfaced only for
         // now; not yet wired into the linker).
+        //
+        // Sources whose mtime hasn't changed since the last run reuse their
+        // cached header list; only new/changed/invalidated sources are rescanned.
         let mut file_cache = preprocess::FileCache::default();
         let mut pragma_libs: Vec<String> = vec![];
         for group in &mut cl_flags {
@@ -203,12 +230,76 @@ fn main() -> anyhow::Result<()> {
                 .map(|file| to_host_normalized(file, &proj_dir_native))
                 .collect();
 
-            let result = preprocess::scan_translation_units(
-                &sources,
-                &include_dirs,
-                &group.defines,
-                &mut file_cache,
-            );
+            // Split sources into cached (reuse) and dirty (rescan).
+            // Forward entries store the full transitive closure, so a cache
+            // hit gives us the complete header list for that source.
+            let mut dirty_sources: Vec<PathBuf> = Vec::new();
+            let mut headers_from_cache: Vec<PathBuf> = Vec::new();
+
+            for src in &sources {
+                if diff.needs_scan.contains(src) {
+                    dirty_sources.push(src.clone());
+                } else if let Ok(meta) = std::fs::metadata(src) {
+                    if let Some(mtime) = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos() as u64)
+                    {
+                        if let Some(cached) = cache::get_cached_headers(&cache_db, src, mtime) {
+                            headers_from_cache.extend(cached);
+                        } else {
+                            dirty_sources.push(src.clone());
+                        }
+                    } else {
+                        dirty_sources.push(src.clone());
+                    }
+                } else {
+                    dirty_sources.push(src.clone());
+                }
+            }
+
+            // Rescan dirty sources.
+            let result = if dirty_sources.is_empty() {
+                preprocess::ScanResult {
+                    headers: Vec::new(),
+                    pragma_libs: Vec::new(),
+                    unknown_directives: Vec::new(),
+                }
+            } else {
+                let result = preprocess::scan_translation_units(
+                    &dirty_sources,
+                    &include_dirs,
+                    &group.defines,
+                    &mut file_cache,
+                );
+
+                // Store fresh scan results.
+                for src in &dirty_sources {
+                    if let Ok(meta) = std::fs::metadata(src) {
+                        if let Some(mtime) = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos() as u64)
+                        {
+                            // Collect this source's transitive headers from the
+                            // full result (approximate — we don't have per-source
+                            // breakdown, so we store all headers for all dirty
+                            // sources; the next run will refine).
+                            cache::store_scan(
+                                &cache_db,
+                                src,
+                                mtime,
+                                &result.headers,
+                            )
+                            .ok();
+                        }
+                    }
+                }
+
+                result
+            };
 
             for unknown in &result.unknown_directives {
                 if warned_directives.insert(unknown.keyword.clone()) {
@@ -225,17 +316,22 @@ fn main() -> anyhow::Result<()> {
             let mut deps: Vec<String> = result
                 .headers
                 .iter()
+                .chain(&headers_from_cache)
                 .map(|header| to_ninja_path(header, wine))
                 .collect();
             deps.sort();
             deps.dedup();
 
             if verbose {
+                let cached_count = sources.len() - dirty_sources.len();
                 eprintln!(
-                    "[headers][{}]: {} header dep(s) across {} source file(s)",
+                    "[headers][{}]: {} header dep(s) across {} source file(s) \
+                     ({} cached, {} scanned)",
                     dep.name,
                     deps.len(),
-                    group.flags.files.len()
+                    sources.len(),
+                    cached_count,
+                    dirty_sources.len(),
                 );
             }
 

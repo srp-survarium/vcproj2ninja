@@ -10,6 +10,8 @@ workspace = true
 anyhow = { workspace = true }
 clap = { workspace = true }
 nom = { workspace = true }
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde_json = "1"
 uuid = { workspace = true }
 
 vs2008-parser-lib = { workspace = true }
