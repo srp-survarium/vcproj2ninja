@@ -32,20 +32,59 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// Caches file contents so a header shared by many translation units / groups is
-/// read from disk only once per generator run.
+/// Per-run cache shared across all projects and cl groups.
+///
+/// Walking a TU's include tree only needs the *directives* of each file, and
+/// those are independent of the group's `/D` defines (conditionals are
+/// re-evaluated per group, but parsing is not affected by them). So each file
+/// is read, comment-stripped and directive-parsed exactly once per generator
+/// run, no matter how many groups reach it — the engine's common headers are
+/// reached by nearly every group, and re-parsing them dominated the scan.
+///
+/// `is_file` probes are cached for the same reason: include resolution stats
+/// the same candidate paths for every group, and each stat is expensive under
+/// Wine (case-insensitive path lookup).
 #[derive(Default)]
 pub struct FileCache {
-    files: HashMap<PathBuf, Option<String>>,
+    files: HashMap<PathBuf, Option<Arc<ParsedFile>>>,
+    exists: HashMap<PathBuf, bool>,
 }
 
 impl FileCache {
-    fn read(&mut self, path: &Path) -> Option<String> {
+    fn parsed(&mut self, path: &Path) -> Option<Arc<ParsedFile>> {
         self.files
             .entry(path.to_path_buf())
-            .or_insert_with(|| std::fs::read_to_string(path).ok())
+            .or_insert_with(|| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .map(|content| Arc::new(ParsedFile::parse(&content)))
+            })
             .clone()
+    }
+
+    fn is_file(&mut self, path: &Path) -> bool {
+        *self
+            .exists
+            .entry(path.to_path_buf())
+            .or_insert_with(|| path.is_file())
+    }
+}
+
+/// The preprocessor directives of one file, in source order. Non-directive
+/// lines are irrelevant to dependency scanning and are dropped at parse time.
+struct ParsedFile {
+    directives: Vec<Directive>,
+}
+
+impl ParsedFile {
+    fn parse(content: &str) -> ParsedFile {
+        let directives = preprocess_text(content)
+            .iter()
+            .filter_map(|line| parse_directive(line))
+            .collect();
+        ParsedFile { directives }
     }
 }
 
@@ -139,7 +178,7 @@ impl Scanner<'_> {
             return;
         }
 
-        let Some(content) = self.cache.read(&canon) else {
+        let Some(parsed) = self.cache.parsed(&canon) else {
             // Unreadable (e.g. an angle include we mistakenly resolved, or a
             // permissions issue). It is still recorded as visited so we don't
             // keep retrying, but it must NOT become a dependency.
@@ -152,36 +191,31 @@ impl Scanner<'_> {
             self.headers.push(canon.clone());
         }
 
-        let dir = canon.parent().unwrap_or(Path::new(""));
-        let lines = preprocess_text(&content);
+        let dir = canon.parent().unwrap_or(Path::new("")).to_path_buf();
 
         // Conditional inclusion stack. We only act on `#include`/`#pragma` when
         // every enclosing branch is (possibly) active.
         let mut stack: Vec<Frame> = Vec::new();
 
-        for line in &lines {
-            let Some(directive) = parse_directive(line) else {
-                continue;
-            };
-
+        for directive in &parsed.directives {
             match directive {
                 Directive::If(expr) => {
                     let parent = active(&stack);
                     let frame = if !parent {
                         Frame::dead(parent)
                     } else {
-                        Frame::from_tri(parent, self.eval_if(&expr))
+                        Frame::from_tri(parent, self.eval_if(expr))
                     };
                     stack.push(frame);
                 }
                 Directive::Ifdef(name) => {
                     let parent = active(&stack);
-                    let tri = self.tri_defined(&name);
+                    let tri = self.tri_defined(name);
                     stack.push(Frame::from_tri(parent, tri));
                 }
                 Directive::Ifndef(name) => {
                     let parent = active(&stack);
-                    let tri = self.tri_defined(&name).negate();
+                    let tri = self.tri_defined(name).negate();
                     stack.push(Frame::from_tri(parent, tri));
                 }
                 Directive::Elif(expr) => {
@@ -189,7 +223,7 @@ impl Scanner<'_> {
                         if !top.parent_active || top.taken {
                             top.active = false;
                         } else {
-                            match self.eval_if(&expr) {
+                            match self.eval_if(expr) {
                                 Tri::True => {
                                     top.active = true;
                                     top.taken = true;
@@ -215,8 +249,8 @@ impl Scanner<'_> {
                 }
                 Directive::Include(spec) => {
                     if active(&stack) {
-                        if let Some((kind, name)) = parse_include(&spec) {
-                            if let Some(resolved) = self.resolve_include(dir, kind, &name) {
+                        if let Some((kind, name)) = parse_include(spec) {
+                            if let Some(resolved) = self.resolve_include(&dir, kind, &name) {
                                 self.process_file(&resolved, false);
                             }
                         }
@@ -224,7 +258,7 @@ impl Scanner<'_> {
                 }
                 Directive::Pragma(rest) => {
                     if active(&stack) {
-                        if let Some(lib) = parse_pragma_comment_lib(&rest) {
+                        if let Some(lib) = parse_pragma_comment_lib(rest) {
                             if self.pragma_seen.insert(lib.clone()) {
                                 self.pragma_libs.push(lib);
                             }
@@ -232,11 +266,11 @@ impl Scanner<'_> {
                     }
                 }
                 Directive::Ignored => {}
-                Directive::Unknown { keyword } => {
+                Directive::Unknown { keyword, line } => {
                     if self.unknown_seen.insert(keyword.clone()) {
                         self.unknown_directives.push(UnknownDirective {
-                            keyword,
-                            line: line.trim().to_string(),
+                            keyword: keyword.clone(),
+                            line: line.clone(),
                             file: canon.clone(),
                         });
                     }
@@ -283,7 +317,7 @@ impl Scanner<'_> {
 
         for candidate in candidates {
             let normalized = normalize(&candidate);
-            if normalized.is_file() {
+            if self.cache.is_file(&normalized) {
                 return Some(normalized);
             }
         }
@@ -379,6 +413,8 @@ enum Directive {
     /// the scanner is failing to follow (it might matter for dependencies).
     Unknown {
         keyword: String,
+        /// The full directive line (trimmed), for warning context.
+        line: String,
     },
 }
 
@@ -434,6 +470,7 @@ fn parse_directive(line: &str) -> Option<Directive> {
         }
         keyword => Directive::Unknown {
             keyword: keyword.to_string(),
+            line: line.trim().to_string(),
         },
     })
 }
@@ -1112,7 +1149,7 @@ mod tests {
         // A genuinely unrecognized directive is still surfaced as unknown.
         assert!(matches!(
             parse_directive("#import \"x.tlb\""),
-            Some(Directive::Unknown { keyword }) if keyword == "import"
+            Some(Directive::Unknown { keyword, .. }) if keyword == "import"
         ));
     }
 
