@@ -128,6 +128,10 @@ fn main() -> anyhow::Result<()> {
     // across the whole run so we can see what — if anything — we're missing.
     let mut warned_directives: HashSet<String> = HashSet::new();
 
+    // Parse/stat cache shared across ALL projects and groups, so a header is
+    // read and directive-parsed at most once per run (see preprocess.rs).
+    let mut file_cache = preprocess::FileCache::default();
+
     for dep in deps {
         project_path.as_mut_os_string().truncate(base_len);
 
@@ -187,65 +191,68 @@ fn main() -> anyhow::Result<()> {
         // Preprocess each cl group's sources to discover the headers they
         // transitively include, so header edits force a recompile. The scan
         // also collects #pragma comment(lib, ...) directives (surfaced only for
-        // now; not yet wired into the linker).
-        let mut file_cache = preprocess::FileCache::default();
-        let mut pragma_libs: Vec<String> = vec![];
-        for group in &mut cl_flags {
-            let include_dirs: Vec<PathBuf> = group
-                .include_dirs
-                .iter()
-                .map(|dir| to_host_normalized(dir, &proj_dir_native))
-                .collect();
-            let sources: Vec<PathBuf> = group
-                .flags
-                .files
-                .iter()
-                .map(|file| to_host_normalized(file, &proj_dir_native))
-                .collect();
+        // now; not yet wired into the linker). Skipped for --target clangd:
+        // the compilation database carries flags and file sets only, never
+        // header deps, so the scan's output would be thrown away.
+        if target == Target::Ninja {
+            let mut pragma_libs: Vec<String> = vec![];
+            for group in &mut cl_flags {
+                let include_dirs: Vec<PathBuf> = group
+                    .include_dirs
+                    .iter()
+                    .map(|dir| to_host_normalized(dir, &proj_dir_native))
+                    .collect();
+                let sources: Vec<PathBuf> = group
+                    .flags
+                    .files
+                    .iter()
+                    .map(|file| to_host_normalized(file, &proj_dir_native))
+                    .collect();
 
-            let result = preprocess::scan_translation_units(
-                &sources,
-                &include_dirs,
-                &group.defines,
-                &mut file_cache,
-            );
+                let result = preprocess::scan_translation_units(
+                    &sources,
+                    &include_dirs,
+                    &group.defines,
+                    &mut file_cache,
+                );
 
-            for unknown in &result.unknown_directives {
-                if warned_directives.insert(unknown.keyword.clone()) {
+                for unknown in &result.unknown_directives {
+                    if warned_directives.insert(unknown.keyword.clone()) {
+                        eprintln!(
+                            "warning: unhandled preprocessor directive '#{}' not followed for \
+                             header deps (first seen in {}: `{}`)",
+                            unknown.keyword,
+                            unknown.file.display(),
+                            unknown.line,
+                        );
+                    }
+                }
+
+                let mut deps: Vec<String> = result
+                    .headers
+                    .iter()
+                    .map(|header| to_ninja_path(header, wine))
+                    .collect();
+                deps.sort();
+                deps.dedup();
+
+                if verbose {
                     eprintln!(
-                        "warning: unhandled preprocessor directive '#{}' not followed for \
-                         header deps (first seen in {}: `{}`)",
-                        unknown.keyword,
-                        unknown.file.display(),
-                        unknown.line,
+                        "[headers][{}]: {} header dep(s) across {} source file(s)",
+                        dep.name,
+                        deps.len(),
+                        group.flags.files.len()
                     );
                 }
+
+                group.header_deps = deps;
+                pragma_libs.extend(result.pragma_libs);
             }
-
-            let mut deps: Vec<String> = result
-                .headers
-                .iter()
-                .map(|header| to_ninja_path(header, wine))
-                .collect();
-            deps.sort();
-            deps.dedup();
-
-            if verbose {
-                eprintln!(
-                    "[headers][{}]: {} header dep(s) across {} source file(s)",
-                    dep.name,
-                    deps.len(),
-                    group.flags.files.len()
-                );
+            pragma_libs.sort();
+            pragma_libs.dedup();
+            if verbose && !pragma_libs.is_empty() {
+                eprintln!("[pragma-libs][{}]: {}", dep.name, pragma_libs.join(" "));
             }
-
-            group.header_deps = deps;
-            pragma_libs.extend(result.pragma_libs);
-        }
-        pragma_libs.sort();
-        pragma_libs.dedup();
-        if verbose && !pragma_libs.is_empty() {
-            eprintln!("[pragma-libs][{}]: {}", dep.name, pragma_libs.join(" "));
         }
 
         // Match the drive-rooted env base in --wine mode: proj_dir is the `cd`
